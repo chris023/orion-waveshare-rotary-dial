@@ -25,7 +25,7 @@ export function createApp(config: Config, logger: Logger = getLogger()): App {
   return {
     async start(): Promise<void> {
       if (config.BROKER_MODE === 'embedded') {
-        broker = await startEmbeddedBroker(config.BROKER_PORT, logger);
+        broker = await startEmbeddedBroker(config.BROKER_PORT, config.BROKER_WS_PORT, logger);
       }
       await controller.start();
       logger.info(

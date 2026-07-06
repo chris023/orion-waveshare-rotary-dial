@@ -76,6 +76,8 @@ const envSchema = z.object({
   MQTT_BASE_TOPIC: z.string().default('orion-dials'),
   BROKER_MODE: z.enum(['none', 'embedded']).default('none'),
   BROKER_PORT: z.coerce.number().int().positive().default(1883),
+  // WebSocket MQTT port for browser dials (the virtual dial simulator). 0 = off.
+  BROKER_WS_PORT: z.coerce.number().int().nonnegative().default(8888),
 
   // Orion Sleep is controlled via its official MCP server (OAuth 2.1), not REST.
   ORION_MCP_URL: z.string().default('https://mcp.orionsleep.com/'),

@@ -322,6 +322,25 @@ async function getJson(url: string): Promise<any> {
   return res.json();
 }
 
+/** Unwrap an MCP tool result: prefer structuredContent, else JSON-parse the text content. */
+function unwrapToolResult(result: unknown): unknown {
+  const r = result as {
+    structuredContent?: unknown;
+    content?: Array<{ type: string; text?: string }>;
+  };
+  if (r?.structuredContent !== undefined) return r.structuredContent;
+  const text = r?.content
+    ?.filter((c) => c.type === 'text')
+    .map((c) => c.text ?? '')
+    .join('\n');
+  if (!text) return result;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return result;
+  }
+}
+
 /** Recursively find the first string value stored under `key` anywhere in a value. */
 function findFirstString(value: unknown, key: string): string | undefined {
   if (Array.isArray(value)) {
@@ -420,11 +439,11 @@ async function main(): Promise<void> {
   // get_device_state (NOT get_insights / no writes). Run: DIAL_READ=1 npm run dial:ref
   if (process.env.DIAL_READ === '1') {
     log('8', 'Read-only probe: list_devices + get_device_state (no writes)...');
-    const devices = await mcp.callTool('list_devices', {});
+    const devices = unwrapToolResult(await mcp.callTool('list_devices', {}));
     console.log(`\n=== list_devices result ===\n${JSON.stringify(devices, null, 2)}`);
-    const serial = findFirstString(devices, 'serial');
+    const serial = findFirstString(devices, 'serial_number') ?? findFirstString(devices, 'serial');
     if (serial) {
-      const st = await mcp.callTool('get_device_state', { serial });
+      const st = unwrapToolResult(await mcp.callTool('get_device_state', { serial }));
       console.log(`\n=== get_device_state(${serial}) result ===\n${JSON.stringify(st, null, 2)}`);
     } else {
       console.log(
