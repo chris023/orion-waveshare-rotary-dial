@@ -16,6 +16,7 @@ coverage/
 secrets/
 captures/
 *.har
+*.der
 
 # Logs
 *.log

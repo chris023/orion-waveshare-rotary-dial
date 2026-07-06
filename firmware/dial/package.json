@@ -1,0 +1,13 @@
+{
+  "name": "orion-knob-firmware",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Moddable XS (TypeScript) firmware for the Waveshare ESP32-S3 knob dial controlling an Orion Sleep topper.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@moddable/typings": "^4.0.0",
+    "typescript": "^5.7.0"
+  }
+}

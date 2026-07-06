@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!**/dist", "!**/node_modules", "!**/coverage"]
+    "includes": ["**", "!**/dist", "!**/node_modules", "!**/coverage", "!**/firmware/dial"]
   },
   "formatter": {
     "enabled": true,

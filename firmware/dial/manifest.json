@@ -1,0 +1,74 @@
+{
+  "include": [
+    "$(MODDABLE)/examples/manifest_base.json",
+    "$(MODDABLE)/examples/manifest_net.json",
+    "$(MODDABLE)/examples/manifest_piu.json",
+    "$(MODDABLE)/examples/manifest_typings.json",
+    "$(MODULES)/crypt/tls.json",
+    "$(MODULES)/files/preference/manifest.json",
+    "$(MODULES)/network/mdns/manifest.json",
+    "$(MODULES)/data/qrcode/manifest.json",
+    "$(MODULES)/commodetto/manifest_outline.json",
+    "./drivers/st77916/manifest.json"
+  ],
+
+  "config": {
+    "ssid": "",
+    "password": "",
+
+    "orion": {
+      "mcpUrl": "https://mcp.orionsleep.com/",
+      "scope": "orion:mcp",
+      "clientName": "orion-knob-dial",
+
+      "mdnsName": "orion-knob",
+      "oauthPort": 8790,
+
+      "deviceSerial": "",
+      "zone": "left",
+      "label": "LEFT",
+
+      "tempMinF": 50,
+      "tempMaxF": 113,
+      "tempStepF": 1
+    },
+
+    "touch": { "sda": 11, "scl": 12, "int": 9, "rst": 10, "hz": 400000 },
+    "encoder": { "phaseA": 8, "phaseB": 7 }
+  },
+
+  "defines": {
+    "st77916": {
+      "width": 360,
+      "height": 360,
+      "cs_pin": 14,
+      "sck_pin": 13,
+      "data0_pin": 15,
+      "data1_pin": 16,
+      "data2_pin": 17,
+      "data3_pin": 18,
+      "rst_pin": 21,
+      "backlight_pin": 47,
+      "hz": 40000000
+    }
+  },
+
+  "modules": {
+    "*": [
+      "./main",
+      "./src/config",
+      "./src/zones",
+      "./src/net",
+      "./src/oauth",
+      "./src/mcp",
+      "./src/orion",
+      "./src/input",
+      "./src/cst816",
+      "./src/ui"
+    ]
+  },
+
+  "resources": {
+    "*": ["./assets/orion-ca"]
+  }
+}
