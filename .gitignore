@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+
+# Env & secrets (NEVER commit real Orion credentials or captures)
+.env
+.env.local
+.env.*.local
+secrets/
+captures/
+*.har
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
