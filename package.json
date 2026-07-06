@@ -13,6 +13,7 @@
     "start": "node dist/main.js",
     "orion:login": "tsx src/cli/orion-login.ts",
     "orion:tools": "tsx src/cli/orion-tools.ts",
+    "dial:ref": "tsx firmware/reference-dial/dial.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
