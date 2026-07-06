@@ -6,11 +6,12 @@
 
 export interface DialDisplay {
   label: string;
-  power: 'on' | 'off' | 'standby';
+  power: 'on' | 'off';
   target: number | null;
   current: number | null;
   active: boolean;
   offline: boolean;
+  relief: 'heat' | 'cool' | null;
 }
 
 const TAU = Math.PI * 2;
@@ -99,7 +100,13 @@ export function render(ctx: CanvasRenderingContext2D, size: number, d: DialDispl
     ctx.font = `500 ${Math.round(size * 0.058)}px system-ui, sans-serif`;
     ctx.fillText(`now ${Math.round(d.current)}°`, cx, cy + size * 0.23);
   }
-  if (on && d.active) {
+  if (d.relief) {
+    // Boost pill.
+    const boostColor = d.relief === 'heat' ? '#f5824d' : '#4b96f5';
+    ctx.fillStyle = boostColor;
+    ctx.font = `700 ${Math.round(size * 0.05)}px system-ui, sans-serif`;
+    ctx.fillText(`⚡ BOOST`, cx, cy + size * 0.31);
+  } else if (on && d.active) {
     ctx.fillStyle = accent;
     ctx.beginPath();
     ctx.arc(cx, cy + size * 0.315, size * 0.014, 0, TAU);

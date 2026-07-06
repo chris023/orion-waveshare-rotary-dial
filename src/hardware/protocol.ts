@@ -74,5 +74,6 @@ export function serializeDisplay(display: DialDisplay): string {
     current: display.current,
     active: display.active,
     offline: display.offline,
+    relief: display.relief,
   });
 }

@@ -60,6 +60,7 @@ describe('serializeDisplay', () => {
       current: 70,
       active: true,
       offline: false,
+      relief: 'heat',
     });
     expect(JSON.parse(json)).toEqual({
       label: 'LEFT',
@@ -68,6 +69,7 @@ describe('serializeDisplay', () => {
       current: 70,
       active: true,
       offline: false,
+      relief: 'heat',
     });
   });
 });

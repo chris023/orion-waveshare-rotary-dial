@@ -10,7 +10,7 @@
  */
 
 import type { DialMessage } from '../domain/events.js';
-import type { Power } from '../domain/state.js';
+import type { Power, ReliefType } from '../domain/state.js';
 
 /** What a dial should render on its screen. */
 export interface DialDisplay {
@@ -24,6 +24,8 @@ export interface DialDisplay {
   readonly active: boolean;
   /** True when the hub has lost contact with the device. */
   readonly offline: boolean;
+  /** Active thermal-relief boost, if any (drives a "boost" indicator). */
+  readonly relief: ReliefType | null;
 }
 
 export type DialEventHandler = (message: DialMessage) => void;

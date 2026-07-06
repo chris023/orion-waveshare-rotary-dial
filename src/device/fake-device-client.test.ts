@@ -35,6 +35,20 @@ describe('FakeDeviceClient', () => {
     expect(second).toBeLessThanOrEqual(100);
   });
 
+  it('startThermalRelief turns the zone on, records the call, and reports relief', async () => {
+    const client = new FakeDeviceClient();
+    await client.startThermalRelief('orion-1', 'left', 'heat', 30);
+    expect(client.calls).toContainEqual({
+      method: 'startThermalRelief',
+      deviceId: 'orion-1',
+      zone: 'left',
+      value: 'heat',
+    });
+    const status = await client.getStatus('orion-1');
+    expect(status.zones.left.power).toBe('on');
+    expect(status.zones.left.relief).toBe('heat');
+  });
+
   it('reports capabilities for both zones', async () => {
     const caps = { unit: 'fahrenheit', min: 60, max: 110, step: 2 } as const;
     const client = new FakeDeviceClient({ caps });

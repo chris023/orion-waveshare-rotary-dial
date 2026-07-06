@@ -62,20 +62,30 @@ visible once authenticated. After logging in:
 npm run orion:tools
 ```
 
-This prints every tool with its JSON input schema. Then:
+This prints all 17 tools with their JSON input schemas.
 
-1. If the real tool names differ from the defaults in
-   `src/device/orion/tool-map.ts` (`get_status`, `set_temperature`, `set_power`,
-   `list_devices`), override them without code changes via `ORION_TOOLS`:
-   ```bash
-   ORION_TOOLS='{"setTemperature":"orion.setZoneTemp","getStatus":"orion.getState"}'
-   ```
-2. Adjust the argument names in `OrionMcpClient.setTemperature/setPower` and the
-   defensive response parsers `coerceZones()` / `coerceDeviceIds()` to match the
-   real payloads. These are intentionally localized so finalizing is a small diff.
+The tool mapping is **confirmed** (`src/device/orion/tool-map.ts`): `list_devices`,
+`get_device_state`, `set_zone` (both temperature and power), `start_thermal_relief`.
+Override any name via `ORION_TOOLS` if Orion renames them.
 
-Until then, keep `DEVICE_CLIENT=fake` (the default) to develop the dial UX
-against the in-memory topper simulator.
+### Model translation (isolated in `OrionMcpClient`)
+
+The rest of the app works in **°F** and **left/right**; the adapter translates to
+the device's units at the boundary:
+
+- **°F ↔ °C** — the API takes Celsius (10–45°C); we convert (`lib/temperature.ts`).
+- **left/right ↔ zone_a/zone_b** — `zone_a` is the RIGHT side, `zone_b` the LEFT,
+  so `left → zone_b`, `right → zone_a`.
+- **deviceId = the device `serial_number`** (from `list_devices`). Set your real
+  serial in `DIAL_BINDINGS` for `DEVICE_CLIENT=orion`.
+- **long-press → `start_thermal_relief`** (a heat "boost").
+
+`getStatus` parses `get_device_state` defensively; its exact output field names
+should be confirmed with a `DIAL_READ=1 npm run dial:ref` run and tightened in
+`parseDeviceState()` if they differ.
+
+Keep `DEVICE_CLIENT=fake` (the default) to develop the dial UX against the
+in-memory topper simulator + the virtual dial (`simulator/`).
 
 ## Security notes
 

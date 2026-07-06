@@ -35,9 +35,4 @@ describe('applyEvent', () => {
     expect(applyEvent({ kind: 'tap' }, off(70), caps).next).toEqual({ power: 'on', target: 70 });
     expect(applyEvent({ kind: 'tap' }, on(70), caps).next).toEqual({ power: 'off', target: 70 });
   });
-
-  it('longPress toggles standby', () => {
-    expect(applyEvent({ kind: 'longPress' }, on(70), caps).next.power).toBe('standby');
-    expect(applyEvent({ kind: 'longPress' }, off(70), caps).next.power).toBe('on');
-  });
 });

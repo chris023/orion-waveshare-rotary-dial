@@ -1,14 +1,15 @@
 /**
  * Orion Sleep DeviceClient backed by the official MCP server
  * (https://mcp.orionsleep.com/). Connects with the MCP SDK over Streamable
- * HTTP, authenticates via OAuth 2.1 (see oauth-provider.ts), discovers the
- * advertised tools, and maps our device operations onto them (see tool-map.ts).
+ * HTTP, authenticates via OAuth 2.1 (oauth-provider.ts), and calls the real
+ * tools: list_devices, get_device_state, set_zone, start_thermal_relief.
  *
- * The exact tool argument/response schemas are only known after an authenticated
- * `listTools()`. Discovery + basic tool invocation are fully implemented; the
- * response coercion in getStatus()/listDevices() is defensive and throws an
- * actionable error if the real shape differs, so finalizing the mapping is a
- * localized change once `npm run orion:tools` reveals the schemas.
+ * This adapter is the ONLY place that knows the device's quirks:
+ *   - the API speaks Celsius (10–45°C); the app/dial works in °F. We convert.
+ *   - the API zones are zone_a (RIGHT side) / zone_b (LEFT side); the app uses
+ *     left/right. We translate.
+ *
+ * `deviceId` in this project maps to the Orion device serial_number.
  */
 
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
@@ -16,19 +17,33 @@ import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { Power, Zone, ZoneCapabilities, ZoneStatus } from '../../domain/state.js';
-import { isZone } from '../../domain/state.js';
+import type { Power, ReliefType, Zone, ZoneCapabilities, ZoneStatus } from '../../domain/state.js';
 import type { Logger } from '../../lib/logger.js';
+import { deviceCToFahrenheit, fahrenheitToDeviceC } from '../../lib/temperature.js';
 import { type DeviceClient, type DeviceStatus, NotImplementedError } from '../device-client.js';
 import { extractJson, isToolError, type OrionToolMap } from './tool-map.js';
 
 export const ORION_MCP_URL = 'https://mcp.orionsleep.com/';
 
+/** app zone -> Orion zone id. zone_a = right side, zone_b = left side. */
+const ZONE_TO_ORION: Record<Zone, string> = { left: 'zone_b', right: 'zone_a' };
+function orionZoneToApp(id: string): Zone | null {
+  if (id === 'zone_a') return 'right';
+  if (id === 'zone_b') return 'left';
+  return null;
+}
+
+interface OrionDevice {
+  id: string;
+  serial_number: string;
+  temperature_range?: { min: number; max: number };
+}
+
 export interface OrionMcpClientOptions {
   url: string;
   provider: OAuthClientProvider;
   toolMap: OrionToolMap;
-  caps: ZoneCapabilities;
+  caps: ZoneCapabilities; // fallback °F caps if the device omits a range
   logger: Logger;
   clientName?: string;
   clientVersion?: string;
@@ -38,13 +53,14 @@ export class OrionMcpClient implements DeviceClient {
   private readonly client: Client;
   private readonly transport: StreamableHTTPClientTransport;
   private readonly toolMap: OrionToolMap;
-  private readonly caps: ZoneCapabilities;
+  private readonly fallbackCaps: ZoneCapabilities;
   private readonly log: Logger;
   private tools: Map<string, Tool> | undefined;
+  private devices: OrionDevice[] | undefined;
 
   constructor(options: OrionMcpClientOptions) {
     this.toolMap = options.toolMap;
-    this.caps = options.caps;
+    this.fallbackCaps = options.caps;
     this.log = options.logger.child({ component: 'orion-mcp' });
     this.client = new Client({
       name: options.clientName ?? 'orion-waveshare-rotary-dial',
@@ -69,7 +85,7 @@ export class OrionMcpClient implements DeviceClient {
     await this.loadTools();
   }
 
-  /** Discover and cache the server's tools; used by callers and the CLI. */
+  /** Discover and cache the server's tools; also used by the orion:tools CLI. */
   async loadTools(): Promise<Tool[]> {
     const { tools } = await this.client.listTools();
     this.tools = new Map(tools.map((t) => [t.name, t]));
@@ -82,7 +98,7 @@ export class OrionMcpClient implements DeviceClient {
     if (!this.tools.has(name)) {
       const available = [...this.tools.keys()].join(', ') || '(none)';
       throw new NotImplementedError(
-        `Orion MCP tool "${name}" not found. Available: ${available}. Run \`npm run orion:tools\` and set ORION_TOOLS to the correct names.`,
+        `Orion MCP tool "${name}" not found. Available: ${available}. Set ORION_TOOLS to the correct names.`,
       );
     }
   }
@@ -96,41 +112,68 @@ export class OrionMcpClient implements DeviceClient {
     return result;
   }
 
-  async listDevices(): Promise<string[]> {
-    const result = await this.call(this.toolMap.listDevices, {});
-    const json = extractJson(result);
-    const ids = coerceDeviceIds(json);
-    if (!ids) {
-      throw new NotImplementedError(
-        `Could not read device ids from "${this.toolMap.listDevices}" output. Inspect it via \`npm run orion:tools\` and adjust coerceDeviceIds() / ORION_TOOLS.`,
-      );
-    }
-    return ids;
+  private async fetchDevices(): Promise<OrionDevice[]> {
+    const json = extractJson(await this.call(this.toolMap.listDevices, {})) as
+      | { devices?: OrionDevice[] }
+      | undefined;
+    this.devices = Array.isArray(json?.devices) ? json.devices : [];
+    return this.devices;
   }
 
-  getCapabilities(_deviceId: string): Promise<Record<Zone, ZoneCapabilities>> {
-    // Orion likely does not expose capabilities as a tool; use configured bounds.
-    return Promise.resolve({ left: this.caps, right: this.caps });
+  async listDevices(): Promise<string[]> {
+    const devices = await this.fetchDevices();
+    return devices.map((d) => d.serial_number).filter((s): s is string => typeof s === 'string');
+  }
+
+  async getCapabilities(deviceId: string): Promise<Record<Zone, ZoneCapabilities>> {
+    const devices = this.devices ?? (await this.fetchDevices());
+    const device = devices.find((d) => d.serial_number === deviceId);
+    const range = device?.temperature_range;
+    const caps: ZoneCapabilities = range
+      ? {
+          unit: 'fahrenheit',
+          min: deviceCToFahrenheit(range.min),
+          max: deviceCToFahrenheit(range.max),
+          step: 1,
+        }
+      : this.fallbackCaps;
+    return { left: caps, right: caps };
   }
 
   async getStatus(deviceId: string): Promise<DeviceStatus> {
-    const result = await this.call(this.toolMap.getStatus, { deviceId });
-    const json = extractJson(result);
-    const zones = coerceZones(json);
-    if (!zones) {
-      throw new NotImplementedError(
-        `Could not read zone status from "${this.toolMap.getStatus}" output. Inspect it via \`npm run orion:tools\` and finalize coerceZones() in mcp-client.ts.`,
-      );
-    }
-    return { deviceId, online: true, zones, fetchedAt: Date.now() };
+    const json = extractJson(await this.call(this.toolMap.getState, { serial: deviceId }));
+    const parsed = parseDeviceState(json);
+    return { deviceId, online: parsed.online, zones: parsed.zones, fetchedAt: Date.now() };
   }
 
   async setTemperature(deviceId: string, zone: Zone, target: number): Promise<void> {
-    await this.call(this.toolMap.setTemperature, { deviceId, zone, target });
+    await this.call(this.toolMap.setZone, {
+      serial: deviceId,
+      zone_id: ZONE_TO_ORION[zone],
+      temp: fahrenheitToDeviceC(target),
+    });
   }
 
   async setPower(deviceId: string, zone: Zone, power: Power): Promise<void> {
-    await this.call(this.toolMap.setPower, { deviceId, zone, power });
+    await this.call(this.toolMap.setZone, {
+      serial: deviceId,
+      zone_id: ZONE_TO_ORION[zone],
+      on: power === 'on',
+    });
+  }
+
+  async startThermalRelief(
+    deviceId: string,
+    zone: Zone,
+    type: ReliefType,
+    minutes: number,
+  ): Promise<void> {
+    await this.call(this.toolMap.thermalRelief, {
+      serial: deviceId,
+      type,
+      zones: [ZONE_TO_ORION[zone]],
+      duration_minutes: minutes,
+    });
   }
 
   async close(): Promise<void> {
@@ -139,65 +182,63 @@ export class OrionMcpClient implements DeviceClient {
   }
 }
 
-/** Defensive: pull device ids from common shapes ([ids], {devices:[...]}, [{id}]). */
-function coerceDeviceIds(json: unknown): string[] | undefined {
-  const arr = Array.isArray(json)
-    ? json
-    : typeof json === 'object' &&
-        json !== null &&
-        Array.isArray((json as { devices?: unknown }).devices)
-      ? (json as { devices: unknown[] }).devices
-      : undefined;
-  if (!arr) return undefined;
-  const ids = arr
-    .map((d) =>
-      typeof d === 'string'
-        ? d
-        : ((d as { id?: unknown; deviceId?: unknown })?.id ??
-          (d as { deviceId?: unknown })?.deviceId),
-    )
-    .filter((d): d is string => typeof d === 'string');
-  return ids.length > 0 ? ids : undefined;
-}
+/**
+ * Defensive parser for get_device_state output (converting °C -> °F and Orion
+ * zone ids -> left/right). The exact field names weren't captured yet, so this
+ * accepts several plausible spellings and falls back to nulls per field. Verify
+ * against a real `DIAL_READ=1 npm run dial:ref` and tighten if needed.
+ */
+function parseDeviceState(json: unknown): { online: boolean; zones: Record<Zone, ZoneStatus> } {
+  const root = (json ?? {}) as Record<string, unknown>;
+  const online = root.online !== false && root.is_online !== false;
+  const rawZones = root.zones ?? root;
+  const byApp = new Map<Zone, ZoneStatus>();
 
-/** Defensive: pull per-zone status from a {zones:{left,right}} or [{zone,...}] shape. */
-function coerceZones(json: unknown): Record<Zone, ZoneStatus> | undefined {
-  if (typeof json !== 'object' || json === null) return undefined;
-  const rawZones = (json as { zones?: unknown }).zones ?? json;
-  const out: Partial<Record<Zone, ZoneStatus>> = {};
-
-  const put = (zone: string, value: Record<string, unknown>): void => {
-    if (!isZone(zone)) return;
-    out[zone] = {
+  const consume = (orionId: string, z: Record<string, unknown>): void => {
+    const zone = orionZoneToApp(orionId);
+    if (!zone) return;
+    const currentC = num(z.temperature ?? z.current_temperature ?? z.current ?? z.temp);
+    const targetC = num(z.target ?? z.target_temperature ?? z.set_temperature ?? z.setpoint);
+    const on = z.on === true || z.is_on === true || z.power === 'on' || z.active === true;
+    byApp.set(zone, {
       zone,
-      power: coercePower(value.power),
-      target: numOrNull(value.target ?? value.targetTemperature),
-      current: numOrNull(value.current ?? value.currentTemperature),
-      active: value.active === true,
-    };
+      power: on ? 'on' : 'off',
+      target: targetC === null ? null : deviceCToFahrenheit(targetC),
+      current: currentC === null ? null : deviceCToFahrenheit(currentC),
+      active:
+        z.active === true || (on && targetC !== null && currentC !== null && targetC !== currentC),
+      relief: reliefOf(z.thermal_relief ?? z.relief),
+    });
   };
 
   if (Array.isArray(rawZones)) {
     for (const z of rawZones) {
-      if (z && typeof z === 'object' && typeof (z as { zone?: unknown }).zone === 'string') {
-        put((z as { zone: string }).zone, z as Record<string, unknown>);
+      if (z && typeof z === 'object' && typeof (z as { id?: unknown }).id === 'string') {
+        consume((z as { id: string }).id, z as Record<string, unknown>);
       }
     }
-  } else if (typeof rawZones === 'object' && rawZones !== null) {
-    for (const [zone, value] of Object.entries(rawZones)) {
-      if (value && typeof value === 'object') put(zone, value as Record<string, unknown>);
+  } else if (rawZones && typeof rawZones === 'object') {
+    for (const [id, z] of Object.entries(rawZones)) {
+      if (z && typeof z === 'object') consume(id, z as Record<string, unknown>);
     }
   }
-  return out.left && out.right ? (out as Record<Zone, ZoneStatus>) : undefined;
+
+  return {
+    online,
+    zones: {
+      left: byApp.get('left') ?? offZone('left'),
+      right: byApp.get('right') ?? offZone('right'),
+    },
+  };
 }
 
-function coercePower(value: unknown): Power {
-  if (value === 'on' || value === 'off' || value === 'standby') return value;
-  if (value === true) return 'on';
-  if (value === false) return 'off';
-  return 'off';
+function offZone(zone: Zone): ZoneStatus {
+  return { zone, power: 'off', target: null, current: null, active: false, relief: null };
 }
-
-function numOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+function num(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+function reliefOf(v: unknown): ReliefType | null {
+  const t = typeof v === 'string' ? v : ((v as { type?: unknown } | null)?.type ?? null);
+  return t === 'heat' || t === 'cool' ? t : null;
 }

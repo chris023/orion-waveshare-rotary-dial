@@ -15,7 +15,7 @@
     "orion:tools": "tsx src/cli/orion-tools.ts",
     "dial:ref": "tsx firmware/reference-dial/dial.ts",
     "sim": "vite",
-    "hub:sim": "DIAL_TRANSPORT=mqtt BROKER_MODE=embedded DEVICE_CLIENT=fake LOG_LEVEL=debug tsx watch src/main.ts",
+    "hub:sim": "DIAL_TRANSPORT=mqtt BROKER_MODE=embedded DEVICE_CLIENT=fake POLL_INTERVAL_MS=2500 LOG_LEVEL=debug tsx watch src/main.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",

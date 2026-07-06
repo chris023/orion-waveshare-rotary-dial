@@ -8,8 +8,8 @@ import { MockDialTransport } from '../hardware/mock-transport.js';
 import { Controller } from './controller.js';
 
 const silent = pino({ level: 'silent' });
-// Default fake caps midpoint = round((55+115)/2) = 85.
-const MID = 85;
+// Default fake caps midpoint = round((50+113)/2) = 82.
+const MID = 82;
 
 function makeController(envOverrides: Record<string, string> = {}) {
   const config = loadConfig({ POLL_INTERVAL_MS: '3600000', ...envOverrides });
@@ -64,6 +64,21 @@ describe('Controller (mock transport + fake device)', () => {
     expect(device.calls).toEqual([
       { method: 'setPower', deviceId: 'orion-1', zone: 'right', value: 'on' },
     ]);
+  });
+
+  it('long-press starts a thermal-relief heat boost on the zone', async () => {
+    const { device, controller } = makeController({ WRITE_DEBOUNCE_MS: '0' });
+    running = controller;
+    await controller.start();
+
+    await controller.handleEvent(msg('dial-left', { kind: 'longPress' }));
+
+    expect(device.calls).toContainEqual({
+      method: 'startThermalRelief',
+      deviceId: 'orion-1',
+      zone: 'left',
+      value: 'heat',
+    });
   });
 
   it('ignores events from an unknown dial', async () => {

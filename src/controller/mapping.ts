@@ -4,12 +4,12 @@
  *
  * Interaction model for the Waveshare knob (rotate + touch, no physical click):
  *   - rotate cw/ccw : adjust target temperature by step*steps (clamped to caps);
- *                     also wakes the zone to "on" if it was off/standby.
+ *                     also wakes the zone to "on" if it was off.
  *   - tap           : toggle power on <-> off.
- *   - longPress     : toggle standby (on -> standby, otherwise -> on).
+ *   - longPress     : handled by the Controller as a thermal-relief boost (not here).
  */
 
-import type { DialEvent } from '../domain/events.js';
+import type { RotateEvent, TapEvent } from '../domain/events.js';
 import {
   clampToCapabilities,
   type DesiredZoneState,
@@ -23,7 +23,7 @@ export interface MappingResult {
 }
 
 export function applyEvent(
-  event: DialEvent,
+  event: RotateEvent | TapEvent,
   current: DesiredZoneState,
   caps: ZoneCapabilities,
 ): MappingResult {
@@ -40,10 +40,6 @@ export function applyEvent(
     }
     case 'tap': {
       const power = current.power === 'off' ? 'on' : 'off';
-      return { next: { ...current, power }, temperatureChanged: false, powerChanged: true };
-    }
-    case 'longPress': {
-      const power = current.power === 'on' ? 'standby' : 'on';
       return { next: { ...current, power }, temperatureChanged: false, powerChanged: true };
     }
   }

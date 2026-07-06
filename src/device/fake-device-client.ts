@@ -1,12 +1,13 @@
 /**
  * In-memory dual-zone topper simulator implementing DeviceClient.
  *
- * Lets the entire hub run end-to-end with no Orion account and no hardware. The
- * simulated "current" temperature drifts toward the target each time it's read,
- * so dial displays show believable movement. Also records calls for assertions.
+ * Lets the entire hub + virtual dial run end-to-end with no Orion account and no
+ * hardware. The simulated "current" temperature drifts toward the target each
+ * time it's read, so dial displays show believable movement. Works in °F (the
+ * app unit), mirroring the real device's 50–113°F scale. Records calls for tests.
  */
 
-import type { Power, Zone, ZoneCapabilities, ZoneStatus } from '../domain/state.js';
+import type { Power, ReliefType, Zone, ZoneCapabilities, ZoneStatus } from '../domain/state.js';
 import { ZONES } from '../domain/state.js';
 import type { DeviceClient, DeviceStatus } from './device-client.js';
 
@@ -20,16 +21,17 @@ interface ZoneModel {
   power: Power;
   target: number;
   current: number;
+  relief: ReliefType | null;
 }
 
 export interface RecordedCall {
-  method: 'setTemperature' | 'setPower';
+  method: 'setTemperature' | 'setPower' | 'startThermalRelief';
   deviceId: string;
   zone: Zone;
-  value: number | Power;
+  value: number | Power | ReliefType;
 }
 
-const DEFAULT_CAPS: ZoneCapabilities = { unit: 'fahrenheit', min: 55, max: 115, step: 1 };
+const DEFAULT_CAPS: ZoneCapabilities = { unit: 'fahrenheit', min: 50, max: 113, step: 1 };
 
 export class FakeDeviceClient implements DeviceClient {
   readonly calls: RecordedCall[] = [];
@@ -44,8 +46,8 @@ export class FakeDeviceClient implements DeviceClient {
     this.now = options.now ?? Date.now;
     const mid = Math.round((this.caps.min + this.caps.max) / 2);
     this.zones = {
-      left: { power: 'off', target: mid, current: mid },
-      right: { power: 'off', target: mid, current: mid },
+      left: { power: 'off', target: mid, current: mid, relief: null },
+      right: { power: 'off', target: mid, current: mid, relief: null },
     };
   }
 
@@ -67,8 +69,7 @@ export class FakeDeviceClient implements DeviceClient {
       const model = this.zones[zone];
       // Drift the simulated current temperature toward the target.
       if (model.power === 'on' && model.current !== model.target) {
-        const dir = Math.sign(model.target - model.current);
-        model.current += dir;
+        model.current += Math.sign(model.target - model.current);
       }
       zones[zone] = {
         zone,
@@ -76,6 +77,7 @@ export class FakeDeviceClient implements DeviceClient {
         target: model.target,
         current: model.current,
         active: model.power === 'on' && model.current !== model.target,
+        relief: model.relief,
       };
     }
     return Promise.resolve({
@@ -89,12 +91,28 @@ export class FakeDeviceClient implements DeviceClient {
   setTemperature(deviceId: string, zone: Zone, target: number): Promise<void> {
     this.calls.push({ method: 'setTemperature', deviceId, zone, value: target });
     this.zones[zone].target = target;
+    this.zones[zone].relief = null;
     return Promise.resolve();
   }
 
   setPower(deviceId: string, zone: Zone, power: Power): Promise<void> {
     this.calls.push({ method: 'setPower', deviceId, zone, value: power });
     this.zones[zone].power = power;
+    if (power === 'off') this.zones[zone].relief = null;
+    return Promise.resolve();
+  }
+
+  startThermalRelief(
+    deviceId: string,
+    zone: Zone,
+    type: ReliefType,
+    _minutes: number,
+  ): Promise<void> {
+    this.calls.push({ method: 'startThermalRelief', deviceId, zone, value: type });
+    const model = this.zones[zone];
+    model.power = 'on';
+    model.relief = type;
+    model.target = type === 'heat' ? this.caps.max : this.caps.min;
     return Promise.resolve();
   }
 

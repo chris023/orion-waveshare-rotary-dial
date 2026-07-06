@@ -1,13 +1,13 @@
 /**
  * PORT: the control surface of a dual-zone liquid-cooled topper.
  *
- * The real Orion Sleep API is not yet documented or captured, so this contract
- * is deliberately transport-agnostic. A `FakeDeviceClient` implements it for
- * tests/dev; `OrionDeviceClient` will implement it against the real cloud once
- * the API is captured (see docs/ORION_API.md).
+ * Transport-agnostic and expressed in the app's units (°F, left/right).
+ * `FakeDeviceClient` implements it in-memory for tests/dev; `OrionMcpClient`
+ * implements it against Orion's real MCP server (translating to °C and
+ * zone_a/zone_b). See docs/ORION_MCP.md.
  */
 
-import type { Power, Zone, ZoneCapabilities, ZoneStatus } from '../domain/state.js';
+import type { Power, ReliefType, Zone, ZoneCapabilities, ZoneStatus } from '../domain/state.js';
 
 export interface DeviceStatus {
   readonly deviceId: string;
@@ -30,6 +30,13 @@ export interface DeviceClient {
   setTemperature(deviceId: string, zone: Zone, target: number): Promise<void>;
   /** Set a zone's power state. */
   setPower(deviceId: string, zone: Zone, power: Power): Promise<void>;
+  /** Start a temporary max heat/cool boost on a zone (auto-restores after). */
+  startThermalRelief(
+    deviceId: string,
+    zone: Zone,
+    type: ReliefType,
+    minutes: number,
+  ): Promise<void>;
   /** Release any resources / sessions. */
   close(): Promise<void>;
 }

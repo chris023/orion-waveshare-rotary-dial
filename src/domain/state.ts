@@ -12,20 +12,17 @@ export function isZone(value: string): value is Zone {
   return value === 'left' || value === 'right';
 }
 
-/**
- * Power state of a zone. Modeled after SleepMe/Eight Sleep: not a boolean, since
- * these systems distinguish actively thermoregulating from idle/standby.
- * "standby" means powered but not actively heating/cooling.
- */
-export type Power = 'on' | 'off' | 'standby';
+/** Power state of a zone. The Orion API models this as a simple boolean on/off. */
+export type Power = 'on' | 'off';
+
+/** Temporary max heat/cool boost ("thermal relief" in the Orion API). */
+export type ReliefType = 'heat' | 'cool';
 
 /**
- * How the topper expresses temperature. Orion advertises 50–115°F, but the app
- * MAY expose an abstract "level" scale (as Eight Sleep does) rather than real
- * degrees — unconfirmed until we capture the API. Callers must not hardcode a
- * range; read it from capabilities.
+ * The unit the app/dial works in. We use °F (matching how the Orion app presents
+ * to US users); the Orion MCP adapter converts to/from the device's Celsius.
  */
-export type TemperatureUnit = 'fahrenheit' | 'celsius' | 'level';
+export type TemperatureUnit = 'fahrenheit' | 'celsius';
 
 export interface ZoneCapabilities {
   readonly unit: TemperatureUnit;
@@ -51,6 +48,8 @@ export interface ZoneStatus {
   readonly current: number | null;
   /** True when actively heating/cooling toward the target. */
   readonly active: boolean;
+  /** Active thermal-relief boost, if any. */
+  readonly relief: ReliefType | null;
 }
 
 export function clampToCapabilities(value: number, caps: ZoneCapabilities): number {

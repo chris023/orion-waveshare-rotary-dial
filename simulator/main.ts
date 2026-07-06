@@ -47,6 +47,7 @@ class Dial {
       current: null,
       active: false,
       offline: true,
+      relief: null,
     };
 
     const root = document.getElementById('dials') as HTMLElement;

@@ -11,9 +11,9 @@ import { DEFAULT_BINDINGS, type DialBinding, dialBindingsSchema } from '../domai
 const toolMapOverrideSchema = z
   .object({
     listDevices: z.string(),
-    getStatus: z.string(),
-    setTemperature: z.string(),
-    setPower: z.string(),
+    getState: z.string(),
+    setZone: z.string(),
+    thermalRelief: z.string(),
   })
   .partial();
 
@@ -90,8 +90,9 @@ const envSchema = z.object({
 
   POLL_INTERVAL_MS: z.coerce.number().int().positive().default(15_000),
   WRITE_DEBOUNCE_MS: z.coerce.number().int().nonnegative().default(300),
-  TEMP_MIN_F: z.coerce.number().default(55),
-  TEMP_MAX_F: z.coerce.number().default(115),
+  // Dial works in °F (matching the Orion app); device range is 50–113°F (10–45°C).
+  TEMP_MIN_F: z.coerce.number().default(50),
+  TEMP_MAX_F: z.coerce.number().default(113),
   TEMP_STEP_F: z.coerce.number().positive().default(1),
 
   DIAL_BINDINGS: bindingsFromJson,

@@ -22,6 +22,9 @@ import { applyEvent } from './mapping.js';
 
 type TimerId = ReturnType<typeof setTimeout>;
 
+/** Duration of the long-press "boost" (thermal relief), in minutes. */
+const RELIEF_MINUTES = 30;
+
 export interface ControllerDeps {
   config: Config;
   transport: DialTransport;
@@ -121,6 +124,15 @@ export class Controller {
       return;
     }
     const { binding } = runtime;
+
+    // Long-press is a "boost": start a thermal-relief heat cycle on the zone.
+    if (message.event.kind === 'longPress') {
+      await this.device.startThermalRelief(binding.deviceId, binding.zone, 'heat', RELIEF_MINUTES);
+      runtime.desired = { ...runtime.desired, power: 'on' };
+      await this.render(runtime);
+      return;
+    }
+
     const result = applyEvent(message.event, runtime.desired, runtime.caps);
     runtime.desired = result.next;
 
@@ -219,6 +231,7 @@ export class Controller {
       current: runtime.status?.current ?? null,
       active: runtime.status?.active ?? false,
       offline: !runtime.online,
+      relief: runtime.status?.relief ?? null,
     };
     return this.transport.publishDisplay(runtime.binding.dialId, display);
   }
