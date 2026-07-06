@@ -322,6 +322,23 @@ async function getJson(url: string): Promise<any> {
   return res.json();
 }
 
+/** Recursively find the first string value stored under `key` anywhere in a value. */
+function findFirstString(value: unknown, key: string): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findFirstString(item, key);
+      if (found) return found;
+    }
+  } else if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      if (k === key && typeof v === 'string') return v;
+      const found = findFirstString(v, key);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
 function waitForCode(expectedState: string, onReady: () => void): Promise<string> {
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
@@ -397,6 +414,24 @@ async function main(): Promise<void> {
   console.log(
     '\nThese names/schemas are what the firmware (and the hub) call to control the topper.',
   );
+
+  // Optional read-only probe to capture the OUTPUT shapes we still need to
+  // finalize getStatus/listDevices parsing. Read-only: only list_devices +
+  // get_device_state (NOT get_insights / no writes). Run: DIAL_READ=1 npm run dial:ref
+  if (process.env.DIAL_READ === '1') {
+    log('8', 'Read-only probe: list_devices + get_device_state (no writes)...');
+    const devices = await mcp.callTool('list_devices', {});
+    console.log(`\n=== list_devices result ===\n${JSON.stringify(devices, null, 2)}`);
+    const serial = findFirstString(devices, 'serial');
+    if (serial) {
+      const st = await mcp.callTool('get_device_state', { serial });
+      console.log(`\n=== get_device_state(${serial}) result ===\n${JSON.stringify(st, null, 2)}`);
+    } else {
+      console.log(
+        '\n(could not auto-detect a serial — paste list_devices above and I will finalize)',
+      );
+    }
+  }
 }
 
 main().catch((err: unknown) => {
