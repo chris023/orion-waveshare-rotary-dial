@@ -27,7 +27,11 @@ Everything is heavily commented with `VERIFY:` (check against your SDK) and
 
 ## Prerequisites
 
-- Moddable SDK **≥ 8.0.0** (for the CO5300 QSPI reference driver) with ESP-IDF 5.x — https://github.com/Moddable-OpenSource/moddable
+- **Moddable SDK ≥ 8.0.0** (for the CO5300 QSPI reference driver) + **ESP-IDF v6.0**.
+  Easiest install (macOS): `brew install xz` then `npm i -g xs-dev` →
+  `xs-dev setup` → `xs-dev setup --device esp32`. See
+  https://xs-dev.js.org/features/setup/ and
+  https://github.com/Moddable-OpenSource/moddable
 - `npm i` here (pulls `@moddable/typings` + `typescript` for type-checking)
 - The board's **ST77916 init sequence + pin map** from the Guition OEM demo
   (`pan.jczn1688.com` → HMI display → `JC3636K518CN_knob_EN.zip`), or
