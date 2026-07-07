@@ -1,27 +1,13 @@
 /*
- * orion-knob board setup. The ST77916 is a backlit IPS panel (unlike the AMOLED
- * CO5300 this driver derives from), so we turn the backlight (GPIO47) on here.
- * Swap to a PWM for dimming later if desired.
+ * orion-knob board setup. The ST77916 is a backlit IPS panel, so turn the
+ * backlight (GPIO47) on. Uses the legacy one-shot pins/digital (modGPIO) — the
+ * same API the driver uses for RST — rather than embedded:io/digital, which
+ * takes exclusive ownership of the pin and threw "in use" during bring-up.
  */
 
-import Digital from "embedded:io/digital";
-
-globalThis.Host = {
-  Backlight: class {
-    constructor(brightness = 100) {
-      this.pin = new Digital({ pin: 47, mode: Digital.Output, initialValue: brightness ? 1 : 0 });
-    }
-    write(value) {
-      this.pin.write(value ? 1 : 0);
-    }
-    close() {
-      this.pin.close();
-    }
-  },
-};
+import Digital from "pins/digital";
 
 export default function (done) {
-  // Keep a reference so it isn't collected — backlight stays on.
-  globalThis.backlight = new globalThis.Host.Backlight(100);
+  Digital.write(47, 1); // backlight full on
   done?.();
 }
