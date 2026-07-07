@@ -8,9 +8,9 @@
     "$(MODULES)/files/preference/manifest.json",
     "$(MODULES)/network/mdns/manifest.json",
     "$(MODULES)/data/qrcode/manifest.json",
-    "$(MODULES)/commodetto/manifest_outline.json",
-    "./drivers/st77916/manifest.json"
+    "$(MODULES)/commodetto/manifest_outline.json"
   ],
+  "//": "The ST77916 screen + pin defines come from the orion-knob TARGET (build with -p esp32/orion-knob after running drivers/st77916/port.sh), not from here.",
 
   "config": {
     "ssid": "",
@@ -35,22 +35,6 @@
 
     "touch": { "sda": 11, "scl": 12, "int": 9, "rst": 10, "hz": 400000 },
     "encoder": { "phaseA": 8, "phaseB": 7 }
-  },
-
-  "defines": {
-    "st77916": {
-      "width": 360,
-      "height": 360,
-      "cs_pin": 14,
-      "sck_pin": 13,
-      "data0_pin": 15,
-      "data1_pin": 16,
-      "data2_pin": 17,
-      "data3_pin": 18,
-      "rst_pin": 21,
-      "backlight_pin": 47,
-      "hz": 40000000
-    }
   },
 
   "modules": {
