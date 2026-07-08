@@ -20,6 +20,8 @@
 #include "lcd_touch_bsp.h"
 #include "user_config.h"
 #include "lcd_bl_pwm_bsp.h"
+#include "dial_wifi.h"
+#include "secrets.h"
 static const char *TAG = "example";
 static SemaphoreHandle_t lvgl_mux = NULL;
 
@@ -459,6 +461,13 @@ void app_main(void)
 #ifdef Backlight_Testing
     xTaskCreate(example_backlight_test_task, "backlight", 3 * 1024, NULL, 2, NULL);
 #endif
+    // Bring up Wi-Fi (credentials from secrets.h). Non-fatal if it times out —
+    // it keeps retrying in the background while the UI runs.
+    if (dial_wifi_start(WIFI_SSID, WIFI_PASSWORD, 20000))
+        ESP_LOGI(TAG, "Wi-Fi connected");
+    else
+        ESP_LOGW(TAG, "Wi-Fi not connected yet (retrying in background)");
+
     ESP_LOGI(TAG, "Display LVGL demos");
     // Lock the mutex due to the LVGL APIs are not thread-safe
     if (example_lvgl_lock(-1))
