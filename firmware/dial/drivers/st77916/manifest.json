@@ -1,5 +1,4 @@
 {
-  "include": ["$(MODULES)/pins/digital/manifest.json"],
   "defines": {
     "st77916": {
       "width": 360,

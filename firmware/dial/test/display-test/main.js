@@ -1,33 +1,41 @@
 /*
- * Standalone ST77916 display test — the de-risk step 2 before the full firmware.
- * Fills the whole round screen with RED, GREEN, BLUE, WHITE in a 1s loop.
+ * ST77916 bring-up — STATIC, high-contrast test pattern.
  *
- * Build/flash:
- *   cd firmware/dial/test/display-test
- *   UPLOAD_PORT=/dev/cu.usbmodem2101 mcconfig -d -m -p esp32/orion-knob
+ * Four fixed horizontal stripes, top -> bottom: WHITE, RED, GREEN, BLUE, on a
+ * black background. No cycling, no timers touching the screen — so what you see
+ * is unambiguous. This resolves two questions at once:
+ *   - Is the pixel pipeline working at all? (do distinct stripes appear?)
+ *   - How are colors mapped? (report which stripe looks which color — that tells
+ *     me the byte order (BE/LE) and whether the 0x21 inversion is right.)
  *
- * What it tells you:
- *   - screen stays black  -> init/pins/QSPI wrong (check driver + defines)
- *   - colors show but RED looks BLUE (swapped) -> flip MADCTL 0x36 to 0x08 in
- *     drivers/st77916/st77916_init.h, or change target config.format BE<->LE
- *   - image is torn/offset -> tweak column_offset/row_offset in the target
+ * Backlight: LEDC PWM on GPIO47 at high duty (the panel's backlight needs a PWM
+ * signal, not static DC). Module-scope reference so it isn't GC'd.
  */
 
 import {} from "piu/MC";
-// @ts-ignore
-import Timer from "timer";
+import PWM from "pins/pwm";
 
-const colors = ["#ff0000", "#00ff00", "#0000ff", "#ffffff"];
-const names = ["RED", "GREEN", "BLUE", "WHITE"];
+const backlight = new PWM({ pin: 47 });
+// ~50% duty. At 93% the panel showed cross-hatch + fade (backlight current likely
+// sags a shared rail); 50% earlier kept the backlight steady. Testing that here.
+backlight.write(512);
+
+const stripe = (top, color) =>
+  new Content(null, {
+    left: 0,
+    right: 0,
+    top,
+    height: 90,
+    skin: new Skin({ fill: color }),
+  });
 
 const application = new Application(null, {
-  skin: new Skin({ fill: colors }),
+  skin: new Skin({ fill: "black" }),
+  contents: [
+    stripe(0, "white"),
+    stripe(90, "red"),
+    stripe(180, "green"),
+    stripe(270, "blue"),
+  ],
 });
-trace(`display ${application.width} x ${application.height}\n`);
-
-let i = 0;
-Timer.repeat(() => {
-  i = (i + 1) % colors.length;
-  application.state = i; // indexes the skin fill array
-  trace(`fill ${names[i]}\n`);
-}, 1000);
+trace(`display ${application.width} x ${application.height} — static WRGB stripes\n`);
