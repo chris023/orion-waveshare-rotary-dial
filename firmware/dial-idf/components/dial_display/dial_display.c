@@ -278,12 +278,20 @@ static void example_lvgl_rounder_cb(struct _lv_disp_drv_t *disp_drv, lv_area_t *
     area->y2 = ((y2 >> 1) << 1) + 1;
 }
 
+static dial_display_touch_filter_t s_touch_filter;
+void dial_display_set_touch_filter(dial_display_touch_filter_t filter)
+{
+    s_touch_filter = filter;
+}
+
 #if EXAMPLE_USE_TOUCH
 static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
     uint16_t tp_x;
     uint16_t tp_y;
     uint8_t win = tpGetCoordinates(&tp_x,&tp_y);
+    if (s_touch_filter && s_touch_filter(win != 0))
+        win = 0;   // swallowed: report released
     if (win)
     {
         #ifdef EXAMPLE_Rotate_90

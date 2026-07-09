@@ -30,6 +30,7 @@
 #include "dial_mcp.h"
 #include "dial_time.h"
 #include "dial_haptics.h"
+#include "dial_power.h"
 #include "bidi_switch_knob.h"
 #include "secrets.h"
 #include "cJSON.h"
@@ -56,9 +57,36 @@ static const char *zone_id_str(zone_idx_t z) { return z == ZONE_A ? "zone_a" : "
 static knob_handle_t s_knob;
 
 // Haptic tick fires here (non-blocking queue write) so the pulse lands with
-// the detent, not a dispatcher period later.
-static void knob_left_cb(void *arg, void *data)  { (void)arg; (void)data; dial_haptics_play(HAPTIC_TICK); ui_router_knob_input(-1); }
-static void knob_right_cb(void *arg, void *data) { (void)arg; (void)data; dial_haptics_play(HAPTIC_TICK); ui_router_knob_input(+1); }
+// the detent, not a dispatcher period later. A detent arriving in standby
+// wakes the screen and is consumed — a 3am reach must not change the temp.
+static void knob_step(int dir)
+{
+    dial_state_stamp_input();
+    if (dial_power_wake_consumes()) return;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_knob_input(dir);
+}
+static void knob_left_cb(void *arg, void *data)  { (void)arg; (void)data; knob_step(-1); }
+static void knob_right_cb(void *arg, void *data) { (void)arg; (void)data; knob_step(+1); }
+
+// Touch filter (LVGL task, every 20ms sample): any contact stamps activity;
+// the press that wakes a standby screen is swallowed end-to-end (LVGL never
+// sees it, so it can't click a button or drag the arc).
+static bool touch_filter(bool pressed)
+{
+    static bool s_consuming;
+    if (!pressed) {
+        s_consuming = false;
+        return false;
+    }
+    dial_state_stamp_input();
+    if (s_consuming) return true;
+    if (dial_power_wake_consumes()) {
+        s_consuming = true;   // swallow until release
+        return true;
+    }
+    return false;
+}
 
 static void knob_init(void)
 {
@@ -395,6 +423,13 @@ static void worker_task(void *arg)
             continue;
         }
 
+        // Night mode: warm-dim + quiet haptics while the household sleeps.
+        // Fixed 21:00-07:00 window until the schedule screens land (M5 pulls
+        // the real bedtime/wake from get_sleep_schedules).
+        struct tm lt;
+        if (dial_time_now(&lt))
+            dial_power_set_night(lt.tm_hour >= 21 || lt.tm_hour < 7);
+
         // No command this tick. Resync only when quiet AND due.
         int64_t now = esp_timer_get_time();
         if (now - dial_state_last_input_us() < KNOB_SETTLE_US) continue;
@@ -447,6 +482,8 @@ void app_main(void)
 {
     dial_display_start();
     dial_state_init();
+    dial_display_set_touch_filter(touch_filter);
+    dial_power_start();
 
     // Router + screens live in the LVGL task from here on. ui_router_start
     // needs the LVGL lock because the LVGL task is already running.
