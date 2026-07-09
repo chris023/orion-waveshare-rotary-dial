@@ -90,7 +90,10 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = data;
-        ESP_LOGI(TAG, "got IP " IPSTR, IP2STR(&e->ip_info.ip));
+        ESP_LOGI(TAG, "got IP " IPSTR ", gw " IPSTR, IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.gw));
+        esp_netif_dns_info_t dns;
+        if (esp_netif_get_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK)
+            ESP_LOGI(TAG, "DNS server " IPSTR, IP2STR(&dns.ip.u_addr.ip4));
         s_retries = 0;
         s_connected = true;
         xEventGroupSetBits(s_events, WIFI_CONNECTED_BIT);
@@ -125,6 +128,15 @@ void dial_net_init(void)
 
 const char *dial_net_ap_ssid(void) { return s_ap_ssid; }
 bool dial_wifi_is_connected(void) { return s_connected; }
+
+bool dial_net_ip(char *out, size_t sz)
+{
+    esp_netif_ip_info_t ip;
+    if (!s_connected || !s_sta_netif || esp_netif_get_ip_info(s_sta_netif, &ip) != ESP_OK)
+        return false;
+    snprintf(out, sz, IPSTR, IP2STR(&ip.ip));
+    return true;
+}
 
 // Seed NVS from a dev secrets value if not already provisioned. Non-placeholder only.
 void dial_net_seed(const char *ssid, const char *pass)

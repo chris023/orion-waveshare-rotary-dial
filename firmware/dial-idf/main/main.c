@@ -21,8 +21,23 @@
 #include "user_config.h"
 #include "lcd_bl_pwm_bsp.h"
 #include "dial_wifi.h"
+#include "dial_oauth.h"
 #include "secrets.h"
 static const char *TAG = "example";
+
+// OAuth foundation test task (needs a large stack for TLS). redirect_uri is the
+// dial's own LAN address; the callback server + consent flow come next.
+static void oauth_test_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(1000));   // let the network stack settle
+    char ip[16];
+    if (dial_net_ip(ip, sizeof(ip))) {
+        char redirect_uri[48];
+        snprintf(redirect_uri, sizeof(redirect_uri), "http://%s/callback", ip);
+        dial_oauth_test(redirect_uri);
+    }
+    vTaskDelete(NULL);
+}
 static SemaphoreHandle_t lvgl_mux = NULL;
 
 
@@ -469,6 +484,10 @@ void app_main(void)
         ESP_LOGW(TAG, "no Wi-Fi creds — join AP \"%s\" to set up", dial_net_ap_ssid());
     dial_net_bringup();
     ESP_LOGI(TAG, "Wi-Fi ready");
+
+    // OAuth foundation smoke test runs in its own task: TLS handshakes need a
+    // much larger stack than app_main has (HTTPS in app_main overflows + reboots).
+    xTaskCreate(oauth_test_task, "oauth", 8192, NULL, 4, NULL);
 
     ESP_LOGI(TAG, "Display LVGL demos");
     // Lock the mutex due to the LVGL APIs are not thread-safe

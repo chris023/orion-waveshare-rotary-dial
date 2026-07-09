@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 
 /*
  * Wi-Fi for the Orion dial: NVS-backed credentials + STA connect + a SoftAP
@@ -30,3 +31,7 @@ const char *dial_net_ap_ssid(void);
 
 // True while the station currently holds an IP lease.
 bool dial_wifi_is_connected(void);
+
+// Copy the current STA IPv4 address as a string (e.g. "192.168.0.48").
+// Returns false if not connected.
+bool dial_net_ip(char *out, size_t sz);
