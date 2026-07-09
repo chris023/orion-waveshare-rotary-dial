@@ -25,17 +25,88 @@
 #include "secrets.h"
 static const char *TAG = "example";
 
-// OAuth foundation test task (needs a large stack for TLS). redirect_uri is the
-// dial's own LAN address; the callback server + consent flow come next.
-static void oauth_test_task(void *arg)
+static bool example_lvgl_lock(int timeout_ms);
+static void example_lvgl_unlock(void);
+
+// Full-screen setup screen: instruction label + a QR of the authorize URL.
+static void ui_show_qr(const char *title, const char *url)
 {
-    vTaskDelay(pdMS_TO_TICKS(1000));   // let the network stack settle
+    if (!example_lvgl_lock(-1)) return;
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_clean(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
+
+    lv_obj_t *label = lv_label_create(scr);
+    lv_label_set_text(label, title);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x0b6a4a), 0);
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 44);
+
+    lv_obj_t *qr = lv_qrcode_create(scr, 220, lv_color_black(), lv_color_white());
+    lv_qrcode_update(qr, url, strlen(url));
+    lv_obj_center(qr);
+    example_lvgl_unlock();
+}
+
+// Centered status message.
+static void ui_show_msg(const char *msg)
+{
+    if (!example_lvgl_lock(-1)) return;
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_clean(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
+    lv_obj_t *label = lv_label_create(scr);
+    lv_obj_set_width(label, 300);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(label, msg);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x0b6a4a), 0);
+    lv_obj_center(label);
+    example_lvgl_unlock();
+}
+
+// OAuth: get a usable access token (stored, refreshed, or via on-screen consent).
+static void oauth_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(1000));
     char ip[16];
-    if (dial_net_ip(ip, sizeof(ip))) {
-        char redirect_uri[48];
-        snprintf(redirect_uri, sizeof(redirect_uri), "http://%s/callback", ip);
-        dial_oauth_test(redirect_uri);
+    if (!dial_net_ip(ip, sizeof(ip))) { vTaskDelete(NULL); return; }
+    char redirect_uri[48];
+    snprintf(redirect_uri, sizeof(redirect_uri), "http://%s/callback", ip);
+
+    oauth_disc_t disc;
+    char client_id[96];
+    if (!dial_oauth_discover(&disc) ||
+        !dial_oauth_ensure_client(&disc, redirect_uri, client_id, sizeof(client_id))) {
+        ui_show_msg("Setup error:\nOrion unreachable");
+        vTaskDelete(NULL);
+        return;
     }
+
+    if (dial_oauth_have_valid_access()) {
+        ESP_LOGI(TAG, "using stored access token");
+    } else if (dial_oauth_refresh(&disc, client_id)) {
+        ESP_LOGI(TAG, "refreshed access token");
+    } else {
+        char url[600];
+        if (dial_oauth_start_authorize(&disc, client_id, redirect_uri, url, sizeof(url))) {
+            ESP_LOGI(TAG, "authorize URL: %s", url);
+            ui_show_qr("Scan to link your dial", url);
+            bool ok = dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 300000);
+            dial_oauth_stop_authorize();
+            if (ok) {
+                ui_show_msg("Dial linked!");
+            } else {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "Link failed:\n%s", dial_oauth_last_error());
+                ui_show_msg(msg);
+                vTaskDelete(NULL);
+                return;
+            }
+        }
+    }
+
+    ui_show_msg("Connected to Orion");
+    // Next: MCP client + Orion control + the temperature UI.
     vTaskDelete(NULL);
 }
 static SemaphoreHandle_t lvgl_mux = NULL;
@@ -473,31 +544,21 @@ void app_main(void)
     lvgl_mux = xSemaphoreCreateMutex();
     assert(lvgl_mux);
     xTaskCreate(example_lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE, NULL, EXAMPLE_LVGL_TASK_PRIORITY, NULL);
-#ifdef Backlight_Testing
-    xTaskCreate(example_backlight_test_task, "backlight", 3 * 1024, NULL, 2, NULL);
-#endif
+
+    ui_show_msg("Connecting to Wi-Fi...");
+
     // Bring up Wi-Fi: connect with stored creds, else run the SoftAP captive
     // portal. Seed from secrets.h in dev so we can skip the portal while iterating.
     dial_net_init();
     dial_net_seed(WIFI_SSID, WIFI_PASSWORD);
     if (!dial_net_have_creds())
         ESP_LOGW(TAG, "no Wi-Fi creds — join AP \"%s\" to set up", dial_net_ap_ssid());
+    ui_show_msg("Connecting to Wi-Fi...");
     dial_net_bringup();
     ESP_LOGI(TAG, "Wi-Fi ready");
+    ui_show_msg("Linking to Orion...");
 
-    // OAuth foundation smoke test runs in its own task: TLS handshakes need a
-    // much larger stack than app_main has (HTTPS in app_main overflows + reboots).
-    xTaskCreate(oauth_test_task, "oauth", 8192, NULL, 4, NULL);
-
-    ESP_LOGI(TAG, "Display LVGL demos");
-    // Lock the mutex due to the LVGL APIs are not thread-safe
-    if (example_lvgl_lock(-1))
-    {
-        lv_demo_widgets();      /* A widgets example */
-        //lv_demo_music();      /* A modern, smartphone-like music player demo. */
-        // lv_demo_stress();    /* A stress test for LVGL. */
-        //lv_demo_benchmark();  /* A demo to measure the performance of LVGL or to compare different settings. */
-        // Release the mutex
-        example_lvgl_unlock();
-    }
+    // OAuth runs in its own task with a generous stack: the TLS handshake plus
+    // the token exchange (large JSON) overflow smaller stacks.
+    xTaskCreate(oauth_task, "oauth", 16384, NULL, 4, NULL);
 }

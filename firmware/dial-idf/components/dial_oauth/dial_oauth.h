@@ -32,5 +32,26 @@ bool dial_oauth_discover(oauth_disc_t *out);
 bool dial_oauth_ensure_client(const oauth_disc_t *disc, const char *redirect_uri,
                               char *client_id_out, size_t sz);
 
-// Foundation smoke test: discover + register + log. Requires Wi-Fi up.
-void dial_oauth_test(const char *redirect_uri);
+// True if a non-expired access token is stored in NVS.
+bool dial_oauth_have_valid_access(void);
+
+// Copy the stored access token. Returns false if none.
+bool dial_oauth_access_token(char *out, size_t sz);
+
+// Refresh the access token using the stored refresh_token. Returns true on success.
+bool dial_oauth_refresh(const oauth_disc_t *disc, const char *client_id);
+
+// Interactive authorization (on-device consent):
+//  1) start: generate PKCE + state, build the authorize URL (for the on-screen
+//     QR), and start the LAN callback HTTP server. Fills url_out.
+bool dial_oauth_start_authorize(const oauth_disc_t *disc, const char *client_id,
+                                const char *redirect_uri, char *url_out, size_t url_sz);
+//  2) finish: block until the phone approves and the callback delivers a code,
+//     then exchange it for tokens (stored in NVS). Returns true on success.
+bool dial_oauth_finish_authorize(const oauth_disc_t *disc, const char *client_id,
+                                 const char *redirect_uri, int timeout_ms);
+//  cleanup the callback server (call after finish, success or not).
+void dial_oauth_stop_authorize(void);
+
+// The most recent token-endpoint error (HTTP status + body snippet), for display.
+const char *dial_oauth_last_error(void);
