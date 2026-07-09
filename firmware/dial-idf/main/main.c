@@ -22,7 +22,9 @@
 #include "lcd_bl_pwm_bsp.h"
 #include "dial_wifi.h"
 #include "dial_oauth.h"
+#include "dial_mcp.h"
 #include "secrets.h"
+#include "cJSON.h"
 static const char *TAG = "example";
 
 static bool example_lvgl_lock(int timeout_ms);
@@ -106,7 +108,62 @@ static void oauth_task(void *arg)
     }
 
     ui_show_msg("Connected to Orion");
-    // Next: MCP client + Orion control + the temperature UI.
+
+    // ---- MCP probe: initialize -> tools/list -> list_devices -> state ----
+    char *server = NULL;
+    if (!dial_mcp_connect(&server)) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "MCP connect failed:\n%s", dial_mcp_last_error());
+        ui_show_msg(msg);
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "MCP server: %s", server ? server : "?");
+
+    int ntools = dial_mcp_list_tools_count();
+    ESP_LOGI(TAG, "tools/list -> %d tools", ntools);
+
+    char devscreen[256];
+    snprintf(devscreen, sizeof(devscreen), "Orion linked\n%s\n%d tools",
+             server ? server : "", ntools);
+
+    // list_devices -> extract first serial_number, then get_device_state.
+    char *devices = NULL;
+    if (dial_mcp_call_tool("list_devices", "{}", &devices) && devices) {
+        ESP_LOGI(TAG, "=== list_devices ===");
+        for (size_t i = 0; i < strlen(devices); i += 512)
+            ESP_LOGI(TAG, "%.512s", devices + i);   // chunked so nothing is dropped
+
+        cJSON *root = cJSON_Parse(devices);
+        cJSON *arr = root ? cJSON_GetObjectItem(root, "devices") : NULL;
+        cJSON *dev0 = cJSON_IsArray(arr) ? cJSON_GetArrayItem(arr, 0) : NULL;
+        cJSON *serial = dev0 ? cJSON_GetObjectItem(dev0, "serial_number") : NULL;
+        cJSON *name   = dev0 ? cJSON_GetObjectItem(dev0, "name") : NULL;
+        if (serial && serial->valuestring) {
+            snprintf(devscreen, sizeof(devscreen), "%s\n%d tools",
+                     (name && name->valuestring) ? name->valuestring : "Orion device",
+                     ntools);
+            char args[64];
+            snprintf(args, sizeof(args), "{\"serial\":\"%s\"}", serial->valuestring);
+            char *state = NULL;
+            if (dial_mcp_call_tool("get_device_state", args, &state) && state) {
+                ESP_LOGI(TAG, "=== get_device_state(%s) ===", serial->valuestring);
+                for (size_t i = 0; i < strlen(state); i += 512)
+                    ESP_LOGI(TAG, "%.512s", state + i);
+                free(state);
+            } else {
+                ESP_LOGW(TAG, "get_device_state failed: %s", dial_mcp_last_error());
+            }
+        }
+        if (root) cJSON_Delete(root);
+        free(devices);
+    } else {
+        ESP_LOGW(TAG, "list_devices failed: %s", dial_mcp_last_error());
+    }
+
+    free(server);
+    ui_show_msg(devscreen);
+    // Next: temperature UI (rotate=set_zone, tap=on/off, long-press=thermal relief).
     vTaskDelete(NULL);
 }
 static SemaphoreHandle_t lvgl_mux = NULL;

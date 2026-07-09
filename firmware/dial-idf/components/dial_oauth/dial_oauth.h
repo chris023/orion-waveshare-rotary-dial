@@ -55,3 +55,7 @@ void dial_oauth_stop_authorize(void);
 
 // The most recent token-endpoint error (HTTP status + body snippet), for display.
 const char *dial_oauth_last_error(void);
+
+// The embedded PEM trust anchors for mcp.orionsleep.com, so the MCP client can
+// reuse the same verified-TLS config instead of the (broken) IDF cert bundle.
+const char *dial_oauth_root_ca(void);

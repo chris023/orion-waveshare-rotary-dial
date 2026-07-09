@@ -119,6 +119,8 @@ static bool json_get_str(cJSON *o, const char *key, char *dst, size_t sz)
     return true;
 }
 
+const char *dial_oauth_root_ca(void) { return orion_root_ca_pem_start; }
+
 /* ---- discovery ------------------------------------------------------- */
 
 bool dial_oauth_discover(oauth_disc_t *out)
