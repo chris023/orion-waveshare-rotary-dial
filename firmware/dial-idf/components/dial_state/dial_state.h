@@ -82,6 +82,32 @@ typedef struct {
     int     ui_temp_f[ZONE_COUNT];  // shown setpoint °F; -1 = follow device
     zone_idx_t ui_zone;             // which side the UI is showing (persisted)
 
+    // --- Onboarding (M4) ---
+    // True for the whole session when the device booted with no stored Wi-Fi
+    // credentials (set once in app_main from !dial_net_have_creds(), before
+    // dial_net_bringup runs the portal). Gates SCR_WELCOME/SCR_SIDEPICK so an
+    // already-provisioned device (upgraded firmware, never picked a side) is
+    // never routed through onboarding again.
+    bool fresh_device;
+    // SCR_WELCOME dismissed (tap or knob). Session-only, deliberately NOT
+    // persisted — the point is just to stop nav_policy from pinning the
+    // welcome screen once the user acknowledges it.
+    bool welcomed;
+    // True once a default side is known: either the user picked one on
+    // SCR_SIDEPICK, or (upgrade path) NVS already had a "zone" key from
+    // before this flag existed. Restored from that key's *existence* in
+    // dial_state_restore_prefs, not its value.
+    bool side_picked;
+
+    // --- Settings (M4) ---
+    // Display units: false = °F (canonical/internal — the store's temp_c is
+    // always °C regardless), true = °C for display only. The arc range and
+    // the knob's 1°F detent stay °F either way.
+    bool units_c;
+    // Haptics master enable, mirrored here so screens can read the current
+    // setting; dial_haptics_set_enabled() is the actual enforcement point.
+    bool haptics_enabled;
+
     // Bumped on every commit; the UI dispatcher re-renders when it changes.
     uint32_t generation;
 } app_state_t;
@@ -110,6 +136,19 @@ void dial_state_set_ui_temp(zone_idx_t zone, int temp_f);
 // navigates right back — the side choice lives in the store, not the router).
 void dial_state_set_ui_zone(zone_idx_t zone);
 
+// --- Onboarding / settings setters (M4) ---
+// Dismiss SCR_WELCOME. Not persisted (see app_state_t.welcomed).
+void dial_state_set_welcomed(void);
+// Mark that a default side is known (see app_state_t.side_picked). Callers
+// that pick a side also call dial_state_set_ui_zone() to persist it.
+void dial_state_set_side_picked(void);
+// Set the display-units preference; persists to NVS "ui"/"units".
+void dial_state_set_units_c(bool units_c);
+// Set the haptics-enabled preference; persists to NVS "ui"/"haptics". Does
+// NOT itself call dial_haptics_set_enabled() — dial_state has no business
+// knowing about the haptics driver, so callers do both.
+void dial_state_set_haptics_enabled(bool enabled);
+
 // --- Input quiet-period gate (torn-read-safe on 32-bit) ---
 void    dial_state_stamp_input(void);   // call on EVERY user input
 int64_t dial_state_last_input_us(void);
@@ -125,6 +164,13 @@ typedef enum {
     CMD_BOOST_CANCEL,  // zone ignored — cancels relief on every zone
     CMD_BED_OFF,       // zone ignored — both zones off, atomically
     CMD_AWAY,          // a=1 away / 0 home
+
+    // Settings (M4) destructive actions — each erases some NVS state and
+    // reboots. Handled in main.c's handle_immediate_cmd like the others
+    // above; none of them return (esp_restart()).
+    CMD_RELINK,          // clear Orion tokens, keep Wi-Fi + client_id
+    CMD_WIFI_RESET,      // clear Wi-Fi credentials
+    CMD_FACTORY_RESET,   // erase all of NVS
 } cmd_kind_t;
 
 typedef struct {

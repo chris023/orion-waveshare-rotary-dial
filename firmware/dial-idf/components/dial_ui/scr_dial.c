@@ -39,6 +39,12 @@ static zone_idx_t s_zone = ZONE_A;
 // The setpoint currently shown (optimistic); -1 until first state arrives.
 static int s_shown_f = -1;
 
+// Display-units cache (design-spec.md's units toggle, M4): updated from
+// apply_palette_and_state on every on_state, read by render_numeral — which
+// is also called mid-drag/mid-detent, where only the raw °F value is at
+// hand. The store, arc range, and knob detent size all stay °F regardless.
+static bool s_units_c;
+
 // Chevron pulse (design-spec.md §6): only running while heating/cooling, and
 // only restarted when that changes or the day/night duration changes.
 static bool s_chevron_active;
@@ -87,6 +93,22 @@ static void anim_nudge(lv_obj_t *obj, int dir)
     lv_anim_set_values(&a, 4 * dir, 0);
     lv_anim_set_time(&a, 140);
     lv_anim_set_path_cb(&a, lv_anim_path_overshoot);
+    lv_anim_start(&a);
+}
+
+// Generic opacity fade to an arbitrary target (the staleness dot's
+// night-quiet level, M4) — like lv_obj_fade_in/out but not hardcoded to
+// LV_OPA_COVER, reusing set_opa_cb above.
+static void anim_opa(lv_obj_t *obj, lv_opa_t from, lv_opa_t to, uint32_t time_ms)
+{
+    lv_anim_del(obj, set_opa_cb);
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, obj);
+    lv_anim_set_exec_cb(&a, set_opa_cb);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_time(&a, time_ms);
+    lv_anim_set_path_cb(&a, lv_anim_path_linear);
     lv_anim_start(&a);
 }
 
@@ -156,6 +178,7 @@ static void apply_palette_and_state(const app_state_t *st)
 {
     const dial_palette_t *pal = PAL();
     bool night = dial_palette_is_night();
+    s_units_c = st->units_c;
     const zone_state_t *z = &st->zones[s_zone];
     zone_kind_t kind = dial_zone_kind(z, st->device_online);
     lv_color_t accent = dial_zone_accent(kind, pal);
@@ -190,11 +213,13 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_text_color(s_name_lbl, pal->ink_secondary, 0);
     apply_identity(pal, night);
 
-    // Water caption.
+    // Water caption — display-only °C conversion when units_c (M4); the
+    // store keeps actual_c as-is either way.
     lv_obj_set_style_text_color(s_water_lbl, pal->ink_secondary, 0);
     lv_obj_set_style_text_opa(s_water_lbl, LV_OPA_80, 0);
     char water[16];
     if (z->actual_c < 0) snprintf(water, sizeof(water), "WATER --");
+    else if (st->units_c) snprintf(water, sizeof(water), "WATER %.1f\xC2\xB0", z->actual_c);
     else snprintf(water, sizeof(water), "WATER %d\xC2\xB0", dial_c_to_f(z->actual_c));
     lv_label_set_text(s_water_lbl, water);
 
@@ -203,6 +228,7 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_text_color(s_temp_lbl, pal->ink_primary, 0);
     lv_obj_set_style_text_opa(s_temp_lbl, (kind == ZK_OFFLINE) ? 115 : LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(s_unit_lbl, pal->ink_secondary, 0);
+    lv_label_set_text(s_unit_lbl, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
 
     // State pill: surface fill, state-accent border/text/glyph. While relief
     // is active it takes over the pill entirely (glyph + countdown word),
@@ -256,13 +282,22 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_border_color(s_power_btn, z->on ? accent : pal->track, 0);
     lv_obj_set_style_text_color(s_power_glyph, z->on ? pal->ink_primary : pal->ink_secondary, 0);
 
-    // Staleness dot.
+    // Staleness dot. Night-quiet errors (design-spec.md's "silent staleness
+    // at night"): shown at 40% instead of full opacity after dark, so a
+    // routine offline blip doesn't glow at 3am.
     lv_obj_set_style_bg_color(s_stale_dot, pal->stale, 0);
+    lv_opa_t stale_target = night ? LV_OPA_40 : LV_OPA_COVER;
     bool stale = (st->phase != PH_READY) || !st->device_online;
     if (stale != s_stale_shown) {
         s_stale_shown = stale;
-        if (stale) lv_obj_fade_in(s_stale_dot, 300, 0);
-        else       lv_obj_fade_out(s_stale_dot, 300, 0);
+        if (stale) anim_opa(s_stale_dot, LV_OPA_TRANSP, stale_target, 300);
+        else       anim_opa(s_stale_dot, lv_obj_get_style_opa(s_stale_dot, 0), LV_OPA_TRANSP, 300);
+    } else if (stale) {
+        // Still stale, no transition this render — keep the level in sync
+        // with a day/night flip (e.g. the worker's dusk palette swap) even
+        // without a fresh fade.
+        lv_anim_del(s_stale_dot, set_opa_cb);
+        lv_obj_set_style_opa(s_stale_dot, stale_target, 0);
     }
 
     // Page dots — filled = the side this screen instance is showing.
@@ -275,10 +310,14 @@ static void apply_palette_and_state(const app_state_t *st)
     else          lv_obj_add_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Display-only °C conversion when s_units_c (M4): one decimal, dial_f_to_c's
+// natural granularity. The value passed in is always °F — the internal
+// representation, arc range, and knob detent never change.
 static void render_numeral(int temp_f)
 {
     char t[8];
-    snprintf(t, sizeof(t), "%d", temp_f);
+    if (s_units_c) snprintf(t, sizeof(t), "%.1f", dial_f_to_c(temp_f));
+    else           snprintf(t, sizeof(t), "%d", temp_f);
     lv_label_set_text(s_temp_lbl, t);
 }
 
@@ -342,6 +381,7 @@ static void create(lv_obj_t *scr, void *arg)
     s_shown_f = -1;
     s_chevron_active = false;
     s_stale_shown = false;
+    s_units_c = false;   // on_state (called right after create) sets the real value
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
     lv_obj_add_event_cb(scr, screen_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
@@ -534,6 +574,10 @@ static void on_state(const app_state_t *st)
     if (!s_arc || !st->have_state) return;
     const zone_state_t *z = &st->zones[s_zone];
 
+    // Runs first: sets s_units_c (among other things) before render_numeral
+    // below reads it — otherwise a units toggle would render one call stale.
+    apply_palette_and_state(st);
+
     // Optimistic intent wins while set; otherwise follow the device.
     int f = (st->ui_temp_f[s_zone] >= 0) ? st->ui_temp_f[s_zone] : dial_c_to_f(z->temp_c);
     s_shown_f = f;
@@ -547,8 +591,6 @@ static void on_state(const app_state_t *st)
         for (char *p = name; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
         lv_label_set_text(s_name_lbl, name);
     }
-
-    apply_palette_and_state(st);
 
     // Countdown ticker: created on the transition into relief, deleted on the
     // transition out (or in destroy() if the screen is torn down first).

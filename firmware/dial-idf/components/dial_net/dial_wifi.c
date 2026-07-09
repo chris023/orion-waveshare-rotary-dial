@@ -89,6 +89,16 @@ static void save_creds(const char *ssid, const char *pass)
     nvs_close(h);
 }
 
+void dial_net_forget(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_erase_key(h, "ssid");
+    nvs_erase_key(h, "pass");
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 static bool load_creds(char *ssid, size_t ssid_sz, char *pass, size_t pass_sz)
 {
     nvs_handle_t h;

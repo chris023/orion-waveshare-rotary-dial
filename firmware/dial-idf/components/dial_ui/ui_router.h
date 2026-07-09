@@ -24,6 +24,9 @@ typedef enum {
     SCR_QUICK,            // quick-actions bottom sheet (arg: zone_idx_t it was opened from)
     SCR_BOOST,            // boost duration picker (arg: (zone_idx_t<<1)|heat)
     SCR_ERROR,            // offline / degraded, with retry countdown
+    SCR_WELCOME,          // fresh-device onboarding splash (M4)
+    SCR_SIDEPICK,         // "which side of the bed?" (M4, reused from Settings)
+    SCR_SETTINGS,         // settings list (M4, arg: zone_idx_t to return to)
     SCR_COUNT,
 } screen_id_t;
 

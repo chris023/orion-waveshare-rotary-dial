@@ -20,6 +20,8 @@
 #include "freertos/task.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "nvs_flash.h"
 
 #include "dial_display.h"
 #include "dial_state.h"
@@ -103,6 +105,16 @@ static void knob_init(void)
 
 static screen_id_t nav_policy(const app_state_t *st, void **arg)
 {
+    // Onboarding (M4): a genuinely fresh device (no Wi-Fi creds at boot; see
+    // app_main) parks on the welcome splash through the earliest connection
+    // phases until the user acknowledges it (tap/knob -> dial_state_set_
+    // welcomed). Checked ahead of the phase switch below so it also
+    // pre-empts PH_WIFI_PORTAL's own screen (join-the-AP QR) — the welcome
+    // screen is meant to be seen first, then dismissed into that QR.
+    if (st->fresh_device && !st->welcomed &&
+        (st->phase == PH_BOOT || st->phase == PH_WIFI_CONNECTING || st->phase == PH_WIFI_PORTAL))
+        return SCR_WELCOME;
+
     switch (st->phase) {
     case PH_WIFI_PORTAL:        return SCR_WIFI_PORTAL;
     case PH_OAUTH_WAIT_CONSENT: return SCR_OAUTH_QR;
@@ -113,13 +125,21 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         // through transient outages rather than yanking the user to a status
         // screen mid-interaction.
         if (st->have_state) {
-            // Quick-actions and boost are transient overlays reached by a
-            // deliberate long-press; a routine state commit (poll landing,
-            // night-mode flip, ...) must not yank the user back to the dial
-            // mid-flow. Returning the current screen unchanged is a no-op in
-            // ui_router_go (same id + same arg), so this is safe every tick.
+            // Quick-actions, boost, and settings are transient overlays
+            // reached by a deliberate action; a routine state commit (poll
+            // landing, night-mode flip, ...) must not yank the user back to
+            // the dial mid-flow. Returning the current screen unchanged is a
+            // no-op in ui_router_go (same id + same arg), so this is safe
+            // every tick.
             screen_id_t cur = ui_router_current();
-            if (cur == SCR_QUICK || cur == SCR_BOOST) return cur;
+            if (cur == SCR_QUICK || cur == SCR_BOOST || cur == SCR_SETTINGS) return cur;
+            // First link on a fresh device: pick a default side before
+            // showing the dial (SCR_SIDEPICK). The `cur` half of this OR
+            // also pins the screen when Settings' "My side" row reuses it on
+            // an already-linked device — a routine poll landing mid-repick
+            // must not yank the user back to the dial before they tap.
+            if ((st->fresh_device && !st->side_picked) || cur == SCR_SIDEPICK)
+                return SCR_SIDEPICK;
             *arg = (void *)(uintptr_t)st->ui_zone;
             return dial_power_level() == DPWR_STANDBY ? SCR_STANDBY : SCR_DIAL;
         }
@@ -230,6 +250,7 @@ static void mut_oauth_url(app_state_t *st, void *arg) { strlcpy(st->oauth_url, a
 static void mut_retry_in(app_state_t *st, void *arg)  { st->retry_in_s = *(int *)arg; }
 static void mut_ap_ssid(app_state_t *st, void *arg)   { strlcpy(st->ap_ssid, arg, sizeof(st->ap_ssid)); }
 static void mut_clock_valid(app_state_t *st, void *arg) { st->clock_valid = *(bool *)arg; }
+static void mut_fresh_device(app_state_t *st, void *arg) { st->fresh_device = *(bool *)arg; }
 
 // No-op mutator: dial_state_commit() bumps the generation unconditionally, so
 // this is just a way to force the dispatcher to re-render after a palette
@@ -533,6 +554,24 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
             dial_state_commit(mut_away, &away);
         break;
     }
+    // Settings (M4) destructive actions: each erases some NVS state and
+    // reboots — there's no follow-up state commit because esp_restart()
+    // never returns.
+    case CMD_RELINK:
+        ESP_LOGW(TAG, "settings: re-link requested — clearing Orion tokens");
+        dial_oauth_forget();
+        esp_restart();
+        break;
+    case CMD_WIFI_RESET:
+        ESP_LOGW(TAG, "settings: Wi-Fi reset requested — clearing credentials");
+        dial_net_forget();
+        esp_restart();
+        break;
+    case CMD_FACTORY_RESET:
+        ESP_LOGW(TAG, "settings: factory reset requested — erasing NVS");
+        nvs_flash_erase();
+        esp_restart();
+        break;
     default:
         break;   // CMD_SET_TEMP/CMD_TOGGLE_ON never reach here (see the drain loop)
     }
@@ -754,6 +793,11 @@ void app_main(void)
 
     dial_net_on_event(net_event_cb);
     dial_net_init();
+    // Onboarding (M4): "fresh" means no Wi-Fi creds were ever stored — read
+    // BEFORE dial_net_seed()'s dev convenience below can inject any, so a
+    // fresh-flashed dev build still exercises the real onboarding flow.
+    bool fresh = !dial_net_have_creds();
+    dial_state_commit(mut_fresh_device, &fresh);
     dial_state_restore_prefs();   // last shown side (needs NVS, hence after net init)
     dial_net_seed(WIFI_SSID, WIFI_PASSWORD);
     dial_state_commit(mut_ap_ssid, (void *)dial_net_ap_ssid());

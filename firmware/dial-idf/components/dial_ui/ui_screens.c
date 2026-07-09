@@ -11,4 +11,7 @@ void ui_screens_register_all(void)
     ui_router_register(SCR_STANDBY, &scr_standby);
     ui_router_register(SCR_QUICK, &scr_quick);
     ui_router_register(SCR_BOOST, &scr_boost);
+    ui_router_register(SCR_WELCOME, &scr_welcome);
+    ui_router_register(SCR_SIDEPICK, &scr_sidepick);
+    ui_router_register(SCR_SETTINGS, &scr_settings);
 }

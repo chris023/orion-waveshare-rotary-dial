@@ -40,6 +40,7 @@ static void on_state(const app_state_t *st)
     if (!s_label) return;
     const char *main_txt = "";
     char sub_txt[160] = "";
+    lv_color_t main_color = lv_color_hex(0xe0e0e0);   // this screen's usual fixed tone
 
     switch (st->phase) {
     case PH_BOOT:              main_txt = "Starting up..."; break;
@@ -52,6 +53,9 @@ static void on_state(const app_state_t *st)
     case PH_MCP_CONNECTING:    main_txt = "Connecting to your bed..."; break;
     case PH_DEGRADED:
         main_txt = "Orion unreachable";
+        // Night-quiet errors (design-spec.md's "silent staleness at night"):
+        // dim to ink_secondary instead of a bright warning tone at 3am.
+        main_color = dial_palette_is_night() ? PAL()->ink_secondary : PAL()->warning;
         if (st->retry_in_s > 0)
             snprintf(sub_txt, sizeof(sub_txt), "%s\nRetrying in %ds",
                      st->phase_err, st->retry_in_s);
@@ -60,6 +64,7 @@ static void on_state(const app_state_t *st)
         break;
     default:                   main_txt = "..."; break;
     }
+    lv_obj_set_style_text_color(s_label, main_color, 0);
     lv_label_set_text(s_label, main_txt);
     lv_label_set_text(s_sub, sub_txt);
 }

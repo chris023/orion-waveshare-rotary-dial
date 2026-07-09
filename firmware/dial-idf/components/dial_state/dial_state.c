@@ -27,6 +27,7 @@ void dial_state_init(void)
     configASSERT(s_mux && s_cmd_q);
     memset(&s_state, 0, sizeof(s_state));
     s_state.phase = PH_BOOT;
+    s_state.haptics_enabled = true;   // matches dial_haptics.c's own default
     for (int z = 0; z < ZONE_COUNT; z++) {
         s_state.ui_temp_f[z]       = -1;
         s_state.zones[z].actual_c  = -1.0f;
@@ -37,14 +38,25 @@ void dial_state_restore_prefs(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
-    uint8_t zone = 0;
-    if (nvs_get_u8(h, "zone", &zone) == ESP_OK && zone < ZONE_COUNT) {
-        xSemaphoreTake(s_mux, portMAX_DELAY);
-        s_state.ui_zone = (zone_idx_t)zone;
-        s_state.generation++;
-        xSemaphoreGive(s_mux);
-    }
+    uint8_t zone = 0, units = 0, haptics = 1;
+    bool have_zone    = nvs_get_u8(h, "zone", &zone) == ESP_OK && zone < ZONE_COUNT;
+    bool have_units   = nvs_get_u8(h, "units", &units) == ESP_OK;
+    bool have_haptics = nvs_get_u8(h, "haptics", &haptics) == ESP_OK;
     nvs_close(h);
+    if (!have_zone && !have_units && !have_haptics) return;
+
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    if (have_zone) {
+        s_state.ui_zone     = (zone_idx_t)zone;
+        // The "zone" key's mere existence means some earlier session already
+        // established a default side — including upgrades from before
+        // side_picked existed, so those devices never re-run SCR_SIDEPICK.
+        s_state.side_picked = true;
+    }
+    if (have_units)   s_state.units_c        = (units != 0);
+    if (have_haptics) s_state.haptics_enabled = (haptics != 0);
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
 }
 
 void dial_state_set_ui_temp(zone_idx_t zone, int temp_f)
@@ -73,6 +85,54 @@ void dial_state_set_ui_zone(zone_idx_t zone)
             nvs_commit(h);
             nvs_close(h);
         }
+    }
+}
+
+void dial_state_set_welcomed(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.welcomed = true;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+}
+
+void dial_state_set_side_picked(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.side_picked = true;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+}
+
+void dial_state_set_units_c(bool units_c)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.units_c = units_c;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    // Settings changes are rare taps in the LVGL task — a ~ms NVS write here
+    // is fine (same reasoning as dial_state_set_ui_zone above).
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "units", units_c ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+void dial_state_set_haptics_enabled(bool enabled)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.haptics_enabled = enabled;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "haptics", enabled ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
     }
 }
 

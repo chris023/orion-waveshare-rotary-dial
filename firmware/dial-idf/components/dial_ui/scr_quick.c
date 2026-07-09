@@ -25,8 +25,8 @@
 static lv_obj_t *s_sheet;
 static lv_obj_t *s_grab;
 static lv_obj_t *s_list;
-static lv_obj_t *s_row_boost_heat, *s_row_boost_cool, *s_row_bed_off, *s_row_away;
-static lv_obj_t *s_lbl_boost_heat, *s_lbl_boost_cool, *s_lbl_bed_off, *s_lbl_away;
+static lv_obj_t *s_row_boost_heat, *s_row_boost_cool, *s_row_bed_off, *s_row_away, *s_row_settings;
+static lv_obj_t *s_lbl_boost_heat, *s_lbl_boost_cool, *s_lbl_bed_off, *s_lbl_away, *s_lbl_settings;
 
 static zone_idx_t s_zone = ZONE_A;   // the dial side this sheet was opened from
 static bool s_away;                  // last-known away flag, for the toggle
@@ -92,6 +92,12 @@ static void row_away_cb(lv_event_t *e)
     dismiss();
 }
 
+static void row_settings_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_router_go(SCR_SETTINGS, (void *)(uintptr_t)s_zone, LV_SCR_LOAD_ANIM_NONE);
+}
+
 /* ---- palette -------------------------------------------------------------*/
 
 static void apply_palette(void)
@@ -102,7 +108,7 @@ static void apply_palette(void)
     lv_obj_set_style_bg_color(s_sheet, pal->surface, 0);
     lv_obj_set_style_bg_color(s_grab, pal->ink_secondary, 0);
 
-    lv_obj_t *labels[] = { s_lbl_boost_heat, s_lbl_boost_cool, s_lbl_bed_off, s_lbl_away };
+    lv_obj_t *labels[] = { s_lbl_boost_heat, s_lbl_boost_cool, s_lbl_bed_off, s_lbl_away, s_lbl_settings };
     for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++)
         lv_obj_set_style_text_color(labels[i], pal->ink_primary, 0);
 }
@@ -170,6 +176,8 @@ static void create(lv_obj_t *scr, void *arg)
     lv_label_set_text(s_lbl_bed_off, "Bed off");
     s_row_away       = make_row(s_list, row_away_cb, &s_lbl_away);
     lv_label_set_text(s_lbl_away, "Away mode on");   // on_state corrects this immediately
+    s_row_settings   = make_row(s_list, row_settings_cb, &s_lbl_settings);
+    lv_label_set_text(s_lbl_settings, "Settings");
 
     apply_palette();
     anim_sheet(SHEET_Y_CLOSED, SHEET_Y_OPEN, 180, lv_anim_path_ease_out, NULL);
@@ -179,8 +187,8 @@ static void destroy(void)
 {
     if (s_sheet) lv_anim_del(s_sheet, NULL);
     s_sheet = s_grab = s_list = NULL;
-    s_row_boost_heat = s_row_boost_cool = s_row_bed_off = s_row_away = NULL;
-    s_lbl_boost_heat = s_lbl_boost_cool = s_lbl_bed_off = s_lbl_away = NULL;
+    s_row_boost_heat = s_row_boost_cool = s_row_bed_off = s_row_away = s_row_settings = NULL;
+    s_lbl_boost_heat = s_lbl_boost_cool = s_lbl_bed_off = s_lbl_away = s_lbl_settings = NULL;
 }
 
 static void on_state(const app_state_t *st)

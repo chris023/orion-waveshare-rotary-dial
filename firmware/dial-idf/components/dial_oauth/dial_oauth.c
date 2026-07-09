@@ -237,6 +237,16 @@ bool dial_oauth_access_token(char *out, size_t sz)
     return nvs_get("access", out, sz);
 }
 
+void dial_oauth_forget(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_erase_key(h, "access");
+    nvs_erase_key(h, "refresh");
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 bool dial_oauth_have_valid_access(void)
 {
     // No wall clock yet: presence == usable. Expiry is handled by refreshing on

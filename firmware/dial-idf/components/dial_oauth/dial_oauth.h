@@ -41,6 +41,12 @@ bool dial_oauth_access_token(char *out, size_t sz);
 // Refresh the access token using the stored refresh_token. Returns true on success.
 bool dial_oauth_refresh(const oauth_disc_t *disc, const char *client_id);
 
+// Settings "Re-link Orion": erase only the stored access/refresh tokens,
+// keeping the registered client_id (DCR is one-time; re-linking shouldn't
+// have to re-register). The next boot finds no valid/refreshable token and
+// falls back to interactive consent.
+void dial_oauth_forget(void);
+
 // Interactive authorization (on-device consent):
 //  1) start: generate PKCE + state, build the authorize URL (for the on-screen
 //     QR), and start the LAN callback HTTP server. Fills url_out.
