@@ -111,12 +111,20 @@ static bool chip_setup(void)
             vTaskDelay(pdMS_TO_TICKS(20));
             rd(REG_GO, &go);
         }
-        rd(REG_A_CAL_COMP, &comp);
-        rd(REG_A_CAL_BEMF, &bemf);
-        rd(REG_FEEDBACK, &cal_fb);
-        cal_store(comp, bemf, cal_fb);
+        // Persist only a fully successful read-back: a transient I2C failure
+        // here must not become permanent bad calibration in NVS. The DIAG
+        // bit (status bit 3) reports cal failure — skip storing then too.
+        uint8_t status = 0xFF;
+        bool reads_ok = rd(REG_A_CAL_COMP, &comp) && rd(REG_A_CAL_BEMF, &bemf) &&
+                        rd(REG_FEEDBACK, &cal_fb) && rd(REG_STATUS, &status);
         wr(REG_MODE, MODE_INTERNAL_TRIGGER);
-        ESP_LOGI(TAG, "auto-calibration done (comp=0x%02x bemf=0x%02x)", comp, bemf);
+        if (reads_ok && !(status & 0x08) && !go) {
+            cal_store(comp, bemf, cal_fb);
+            ESP_LOGI(TAG, "auto-calibration done (comp=0x%02x bemf=0x%02x)", comp, bemf);
+        } else {
+            ESP_LOGW(TAG, "auto-calibration not stored (reads_ok=%d status=0x%02x go=%d)"
+                          " — will retry next boot", reads_ok, status, go);
+        }
     }
     return true;
 }

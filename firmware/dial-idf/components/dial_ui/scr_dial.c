@@ -236,31 +236,37 @@ static void render_numeral(int temp_f)
     lv_label_set_text(s_temp_lbl, t);
 }
 
-static void post_temp(int temp_f)
+static void post_temp_for(zone_idx_t zone, int temp_f)
 {
-    s_shown_f = temp_f;
-    dial_state_set_ui_temp(s_zone, temp_f);
-    app_cmd_t cmd = { .kind = CMD_SET_TEMP, .zone = s_zone, .temp_f = temp_f };
+    if (zone == s_zone) s_shown_f = temp_f;
+    dial_state_set_ui_temp(zone, temp_f);
+    app_cmd_t cmd = { .kind = CMD_SET_TEMP, .zone = zone, .temp_f = temp_f };
     dial_cmd_post(&cmd);
 }
 
+static void post_temp(int temp_f) { post_temp_for(s_zone, temp_f); }
+
 // LVGL event callbacks already hold the LVGL mutex — no locking here.
+// The zone rides in user_data, bound at create(): a release event delivered
+// after a swipe already flipped s_zone must command the zone the widget was
+// built for, not whichever side the screen shows now.
 static void arc_event_cb(lv_event_t *e)
 {
     dial_state_stamp_input();
-    int f = lv_arc_get_value(s_arc);
+    lv_obj_t *arc = lv_event_get_target(e);
+    int f = lv_arc_get_value(arc);
     if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
-        render_numeral(f);                          // live feedback while dragging
+        if (s_temp_lbl) render_numeral(f);          // live feedback while dragging
     } else {                                          // LV_EVENT_RELEASED
-        post_temp(f);
+        post_temp_for((zone_idx_t)(uintptr_t)lv_event_get_user_data(e), f);
     }
 }
 
 static void power_event_cb(lv_event_t *e)
 {
-    (void)e;
     dial_haptics_play(HAPTIC_CONFIRM);
-    app_cmd_t cmd = { .kind = CMD_TOGGLE_ON, .zone = s_zone };
+    app_cmd_t cmd = { .kind = CMD_TOGGLE_ON,
+                      .zone = (zone_idx_t)(uintptr_t)lv_event_get_user_data(e) };
     dial_cmd_post(&cmd);
 }
 
@@ -285,8 +291,8 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_arc_width(s_arc, 16, LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(s_arc, true, LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(s_arc, LV_OPA_TRANSP, LV_PART_KNOB);   // draggable, invisible
-    lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_VALUE_CHANGED, (void *)(uintptr_t)s_zone);
+    lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)s_zone);
 
     // #4 Ghost ring.
     s_ghost = lv_obj_create(scr);
@@ -379,7 +385,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_radius(s_power_btn, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(s_power_btn, 2, 0);
     lv_obj_align(s_power_btn, LV_ALIGN_CENTER, 0, 280 - CY);
-    lv_obj_add_event_cb(s_power_btn, power_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_power_btn, power_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)s_zone);
     s_power_glyph = lv_label_create(s_power_btn);
     lv_obj_set_style_text_font(s_power_glyph, &lv_font_montserrat_28, 0);
     lv_label_set_text(s_power_glyph, LV_SYMBOL_POWER);

@@ -57,6 +57,8 @@ uint8_t i2c_write_buff(i2c_master_dev_handle_t dev_handle,int reg,uint8_t *buf,u
   else
   {
     pbuf = (uint8_t*)malloc(len+1);
+    if(pbuf == NULL)
+    return 1;
     pbuf[0] = reg;
     for(uint8_t i = 0; i<len; i++)
     {

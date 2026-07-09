@@ -52,7 +52,19 @@ static dial_net_event_cb_t s_event_cb;
 static void emit(dial_net_event_t ev) { if (s_event_cb) s_event_cb(ev); }
 void dial_net_on_event(dial_net_event_cb_t cb) { s_event_cb = cb; }
 
-static void retry_timer_cb(void *arg) { esp_wifi_connect(); }
+// Reconnect indirection: the esp_timer task is shared with lv_tick_inc and
+// the knob decoder, so the timer callback must not call esp_wifi_connect()
+// (a Wi-Fi control call with no bounded-latency guarantee). It only posts a
+// custom event; the actual connect runs on the event-loop task, the same
+// context every stock IDF example connects from.
+ESP_EVENT_DEFINE_BASE(DIAL_NET_EVENT);
+enum { DIAL_NET_RETRY_CONNECT };
+
+static void retry_timer_cb(void *arg)
+{
+    (void)arg;
+    esp_event_post(DIAL_NET_EVENT, DIAL_NET_RETRY_CONNECT, NULL, 0, 0);
+}
 
 /* ---- credential storage ---------------------------------------------- */
 
@@ -92,7 +104,9 @@ static bool load_creds(char *ssid, size_t ssid_sz, char *pass, size_t pass_sz)
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+    if (base == DIAL_NET_EVENT && id == DIAL_NET_RETRY_CONNECT) {
+        if (!s_connected) esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         // sta_connect() issues the connect itself; connecting here as well
         // caused the benign-but-noisy "sta is connecting" error at boot.
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -148,6 +162,7 @@ void dial_net_init(void)
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(DIAL_NET_EVENT, DIAL_NET_RETRY_CONNECT, on_event, NULL, NULL));
 
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);

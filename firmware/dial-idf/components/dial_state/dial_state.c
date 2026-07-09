@@ -14,8 +14,10 @@ static QueueHandle_t     s_cmd_q;
 static app_state_t       s_state;
 
 // Written from LVGL task (touch), knob decoder task, and worker; read from the
-// worker's poll gate. 64-bit stores tear on Xtensa, so guard with the mutex —
-// contention is rare and sub-microsecond.
+// worker's poll gate. 64-bit stores tear on Xtensa, so guard with a SPINLOCK,
+// not a mutex: the knob decoder runs in the shared esp_timer task (which also
+// dispatches lv_tick_inc) and must never block on a held mutex.
+static portMUX_TYPE s_input_mux = portMUX_INITIALIZER_UNLOCKED;
 static int64_t s_last_input_us;
 
 void dial_state_init(void)
@@ -77,7 +79,16 @@ void dial_state_set_ui_zone(zone_idx_t zone)
 void dial_cmd_post(const app_cmd_t *cmd)
 {
     dial_state_stamp_input();
-    xQueueSend(s_cmd_q, cmd, 0);
+    if (xQueueSend(s_cmd_q, cmd, 0) != pdTRUE) {
+        // Queue full (worker stuck in a slow network call through a 16-input
+        // burst). For SET_TEMP the newest value must win: drop the oldest
+        // command to make room. A lost TOGGLE would silently flip power, so
+        // for toggles the drop-oldest is still the right bias (the oldest is
+        // most likely an earlier temp step).
+        app_cmd_t scrapped;
+        xQueueReceive(s_cmd_q, &scrapped, 0);
+        xQueueSend(s_cmd_q, cmd, 0);
+    }
 }
 
 bool dial_cmd_receive(app_cmd_t *out, int timeout_ms)
@@ -111,15 +122,16 @@ void dial_state_set_phase(conn_phase_t phase, const char *err)
 
 void dial_state_stamp_input(void)
 {
-    xSemaphoreTake(s_mux, portMAX_DELAY);
-    s_last_input_us = esp_timer_get_time();
-    xSemaphoreGive(s_mux);
+    int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_input_mux);
+    s_last_input_us = now;
+    taskEXIT_CRITICAL(&s_input_mux);
 }
 
 int64_t dial_state_last_input_us(void)
 {
-    xSemaphoreTake(s_mux, portMAX_DELAY);
+    taskENTER_CRITICAL(&s_input_mux);
     int64_t v = s_last_input_us;
-    xSemaphoreGive(s_mux);
+    taskEXIT_CRITICAL(&s_input_mux);
     return v;
 }

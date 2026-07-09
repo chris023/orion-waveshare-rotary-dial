@@ -129,6 +129,7 @@ typedef struct {
     bool safety_error;
     char safety_desc[96];
     char water_fill[12];
+    int64_t poll_started_us;   // when the get_device_state round-trip began
 } device_snapshot_t;
 
 static void mut_device_state(app_state_t *st, void *arg)
@@ -140,13 +141,20 @@ static void mut_device_state(app_state_t *st, void *arg)
         memcpy(keep, st->zones[z].user_name, sizeof(keep));
         st->zones[z] = d->zones[z];
         memcpy(st->zones[z].user_name, keep, sizeof(keep));
-        st->ui_temp_f[z] = -1;              // device truth is the new baseline
     }
     st->device_online = d->online;
     st->safety.error = d->safety_error;
     strlcpy(st->safety.desc, d->safety_desc, sizeof(st->safety.desc));
     strlcpy(st->water_fill, d->water_fill, sizeof(st->water_fill));
     st->have_state = true;
+    // Clear optimistic intent ONLY if no input arrived after this poll's
+    // round-trip began: the response predates any newer knob turn, and truth
+    // from before the user's input must not clobber what they just asked for.
+    // (The failed-write case still converges: the next quiet-period poll runs
+    // with no newer input and clears the stale intent.)
+    if (dial_state_last_input_us() <= d->poll_started_us)
+        for (int z = 0; z < ZONE_COUNT; z++)
+            st->ui_temp_f[z] = -1;
 }
 
 typedef struct { char names[ZONE_COUNT][24]; char serial[16]; } device_identity_t;
@@ -199,6 +207,7 @@ static zone_idx_t zone_idx_from_id(const char *id)
 
 static bool orion_refresh_state(void)
 {
+    int64_t started_us = esp_timer_get_time();
     char args[48];
     snprintf(args, sizeof(args), "{\"serial\":\"%s\"}", s_serial);
     char *json = NULL;
@@ -207,7 +216,7 @@ static bool orion_refresh_state(void)
     free(json);
     if (!root) return false;
 
-    device_snapshot_t d = { 0 };
+    device_snapshot_t d = { .poll_started_us = started_us };
     for (int z = 0; z < ZONE_COUNT; z++) d.zones[z].actual_c = -1.0f;
     strlcpy(d.water_fill, "unknown", sizeof(d.water_fill));
 
@@ -318,17 +327,25 @@ static void backoff_wait(int seconds)
 // 401-aware call wrapper: on failure, refresh the token, reopen the MCP
 // session, retry once. Used for polls AND writes so an expired token never
 // silently drops a command.
-static bool with_auth_retry(bool (*call)(void), const oauth_disc_t *disc, const char *client_id)
+static bool with_auth_retry(bool (*call)(void *), void *arg,
+                            const oauth_disc_t *disc, const char *client_id)
 {
-    if (call()) return true;
+    if (call(arg)) return true;
     if (dial_oauth_refresh(disc, client_id)) {
         dial_mcp_connect(NULL);
-        return call();
+        return call(arg);
     }
     return false;
 }
 
-static bool poll_call(void) { return orion_refresh_state(); }
+static bool poll_call(void *arg) { (void)arg; return orion_refresh_state(); }
+
+typedef struct { zone_idx_t zone; const char *field_json; } set_zone_args_t;
+static bool set_zone_call(void *arg)
+{
+    set_zone_args_t *a = arg;
+    return orion_set_zone(a->zone, a->field_json);
+}
 
 static void worker_task(void *arg)
 {
@@ -357,7 +374,7 @@ static void worker_task(void *arg)
             !dial_oauth_ensure_client(&disc, redirect_uri, client_id, sizeof(client_id))) {
             dial_state_set_phase(PH_DEGRADED, "Orion unreachable");
             backoff_wait(backoff_s);
-            if (backoff_s < BACKOFF_MAX_S) backoff_s *= 2;
+            backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
             continue;
         }
 
@@ -384,7 +401,7 @@ static void worker_task(void *arg)
         if (!dial_mcp_connect(NULL) || !orion_discover_device()) {
             dial_state_set_phase(PH_DEGRADED, dial_mcp_last_error());
             backoff_wait(backoff_s);
-            if (backoff_s < BACKOFF_MAX_S) backoff_s *= 2;
+            backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
             continue;
         }
         backoff_s = BACKOFF_MIN_S;
@@ -392,7 +409,7 @@ static void worker_task(void *arg)
     }
     ESP_LOGI(TAG, "device linked; %d tools", dial_mcp_list_tools_count());
 
-    with_auth_retry(poll_call, &disc, client_id);
+    with_auth_retry(poll_call, NULL, &disc, client_id);
     dial_state_set_phase(PH_READY, NULL);
     knob_init();          // safe now: full board init done, router running
     dial_haptics_init();  // I2C bus is quiet by now; cal runs once, then NVS
@@ -418,14 +435,16 @@ static void worker_task(void *arg)
                     zone_on_t up = { z, !st.zones[z].on };
                     char f[24];
                     snprintf(f, sizeof(f), "\"on\":%s", up.on ? "true" : "false");
-                    if (orion_set_zone((zone_idx_t)z, f))
+                    set_zone_args_t sa = { (zone_idx_t)z, f };
+                    if (with_auth_retry(set_zone_call, &sa, &disc, client_id))
                         dial_state_commit(mut_zone_on, &up);
                 }
                 if (last_temp[z] >= 0) {
                     zone_temp_t up = { z, dial_f_to_c(last_temp[z]) };
                     char f[24];
                     snprintf(f, sizeof(f), "\"temp\":%.1f", up.temp_c);
-                    if (orion_set_zone((zone_idx_t)z, f))
+                    set_zone_args_t sa = { (zone_idx_t)z, f };
+                    if (with_auth_retry(set_zone_call, &sa, &disc, client_id))
                         dial_state_commit(mut_zone_temp, &up);
                 }
             }
@@ -464,7 +483,7 @@ static void worker_task(void *arg)
             continue;
         }
 
-        if (with_auth_retry(poll_call, &disc, client_id)) {
+        if (with_auth_retry(poll_call, NULL, &disc, client_id)) {
             poll_failures = 0;
             dial_state_set_phase(PH_READY, NULL);
         } else if (++poll_failures >= 3) {

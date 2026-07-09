@@ -49,21 +49,35 @@ static dial_palette_t night_table(void)
     };
 }
 
-static dial_palette_t s_active;
-static bool           s_night;
-static bool           s_init;
+/*
+ * The worker flips night mode while the LVGL task reads tokens field-by-field,
+ * so the active table must never be rewritten in place (a swap mid-render
+ * would paint a torn day/night mix). Both tables are built once and the
+ * switch is a single aligned pointer store — atomic on Xtensa.
+ */
+static dial_palette_t s_day, s_nightt;
+static const dial_palette_t *volatile s_active;
+static volatile bool s_night;
+
+static void ensure_init(void)
+{
+    if (s_active) return;
+    s_day    = day_table();
+    s_nightt = night_table();
+    s_active = &s_day;
+}
 
 void dial_palette_set_night(bool night)
 {
-    s_night = night;
-    s_active = night ? night_table() : day_table();
-    s_init = true;
+    ensure_init();
+    s_night  = night;
+    s_active = night ? &s_nightt : &s_day;
 }
 
 bool dial_palette_is_night(void) { return s_night; }
 
 const dial_palette_t *PAL(void)
 {
-    if (!s_init) dial_palette_set_night(false);   // default to day until told otherwise
-    return &s_active;
+    ensure_init();   // first caller is the LVGL task at boot, pre-worker
+    return s_active;
 }
