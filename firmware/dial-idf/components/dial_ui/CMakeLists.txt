@@ -5,7 +5,7 @@ idf_component_register(
          "scr_settings.c" "dial_palette.c" "dial_font_num_88.c"
     INCLUDE_DIRS "."
     REQUIRES dial_state
-    PRIV_REQUIRES esp_timer dial_haptics dial_power esp_app_format)
+    PRIV_REQUIRES esp_timer dial_haptics dial_power esp_app_format dial_ota)
 
 # lv_font_conv emits a font source that includes "lvgl.h" directly (not via
 # the project's lv_conf-relative path) unless told to use the simple include.

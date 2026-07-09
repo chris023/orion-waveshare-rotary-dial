@@ -136,6 +136,20 @@ typedef struct {
     // setting; dial_haptics_set_enabled() is the actual enforcement point.
     bool haptics_enabled;
 
+    // --- OTA (M6) ---
+    // Mirrors dial_ota_info_t (components/dial_ota/dial_ota.h) field-for-
+    // field, without a direct dependency on it: dial_state is a leaf
+    // component (no REQUIRES beyond esp_timer/nvs_flash), so it can't
+    // #include dial_ota.h. The worker (main.c, which includes both) commits
+    // this after every dial_ota_* call; `status` holds a dial_ota_status_t
+    // value (int-cast, same enum ordering/values on both sides).
+    struct {
+        int  status;
+        char latest[16];
+        int  progress_pct;
+        char err[96];
+    } ota;
+
     // Bumped on every commit; the UI dispatcher re-renders when it changes.
     uint32_t generation;
 } app_state_t;
@@ -214,6 +228,12 @@ typedef enum {
     CMD_RELINK,          // clear Orion tokens, keep Wi-Fi + client_id
     CMD_WIFI_RESET,      // clear Wi-Fi credentials
     CMD_FACTORY_RESET,   // erase all of NVS
+
+    // Software update (M6), from Settings' "Software update" row.
+    CMD_OTA_CHECK,       // -> dial_ota_check(); zone/a/b unused
+    CMD_OTA_APPLY,       // -> dial_ota_download_and_apply() + reboot on
+                         // success; worker drops this unless ota.status is
+                         // already OTA_AVAILABLE (stale-tap guard)
 } cmd_kind_t;
 
 typedef struct {

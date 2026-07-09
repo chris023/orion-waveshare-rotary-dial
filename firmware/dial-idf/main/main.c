@@ -34,6 +34,7 @@
 #include "dial_haptics.h"
 #include "dial_power.h"
 #include "dial_palette.h"
+#include "dial_ota.h"
 #include "bidi_switch_knob.h"
 #include "secrets.h"
 #include "cJSON.h"
@@ -49,6 +50,10 @@ static const char *TAG = "app";
 // Sleep schedules (M5) don't change minute to minute — refresh far less
 // often than device state, piggybacked on the same idle poll path.
 #define SCHED_INTERVAL_US (30LL * 60 * 1000000)   // ~30 min
+
+// Auto OTA check (M6): once per uptime-day, and only checks (never applies)
+// — see the gating comment at its call site for the full safe-window rule.
+#define OTA_AUTOCHECK_INTERVAL_US (24LL * 60 * 60 * 1000000)
 
 #define BACKOFF_MIN_S  5
 #define BACKOFF_MAX_S 60
@@ -315,6 +320,37 @@ static void mut_retry_in(app_state_t *st, void *arg)  { st->retry_in_s = *(int *
 static void mut_ap_ssid(app_state_t *st, void *arg)   { strlcpy(st->ap_ssid, arg, sizeof(st->ap_ssid)); }
 static void mut_clock_valid(app_state_t *st, void *arg) { st->clock_valid = *(bool *)arg; }
 static void mut_fresh_device(app_state_t *st, void *arg) { st->fresh_device = *(bool *)arg; }
+
+// Mirrors a dial_ota_info_t snapshot into app_state_t.ota (see dial_state.h's
+// comment on that field for why it's a plain-int mirror, not a #include).
+static void mut_ota(app_state_t *st, void *arg)
+{
+    const dial_ota_info_t *info = arg;
+    st->ota.status = (int)info->status;
+    strlcpy(st->ota.latest, info->latest, sizeof(st->ota.latest));
+    st->ota.progress_pct = info->progress_pct;
+    strlcpy(st->ota.err, info->err, sizeof(st->ota.err));
+}
+
+// Fetches the fresh dial_ota_get() snapshot and commits it.
+static void commit_ota_snapshot(void)
+{
+    dial_ota_info_t info;
+    dial_ota_get(&info);
+    dial_state_commit(mut_ota, &info);
+}
+
+// OTA rollback health check (M6): dial_ota_mark_valid_if_pending() is
+// idempotent, but there's nothing left to confirm after the first success —
+// this guards against re-reading the OTA partition state on every ~10s poll
+// for the rest of the device's uptime.
+static bool s_ota_confirmed;
+static void ota_confirm_once(void)
+{
+    if (s_ota_confirmed) return;
+    dial_ota_mark_valid_if_pending();
+    s_ota_confirmed = true;
+}
 
 // No-op mutator: dial_state_commit() bumps the generation unconditionally, so
 // this is just a way to force the dispatcher to re-render after a palette
@@ -719,6 +755,19 @@ static bool set_zone_call(void *arg)
     return orion_set_zone(a->zone, a->field_json);
 }
 
+// dial_ota_download_and_apply's progress callback: fires on every
+// esp_https_ota_perform() iteration (every ~4KB read), far too often to
+// commit unthrottled — a store commit bumps the generation and triggers a
+// full settings-screen re-render. Only commit on a >=5-point change (or the
+// final 100%), same idea as the staleness-dot fade elsewhere in the app.
+static int s_ota_last_committed_pct = -100;
+static void ota_progress_cb(int pct)
+{
+    if (pct < 100 && pct - s_ota_last_committed_pct < 5) return;
+    s_ota_last_committed_pct = pct;
+    commit_ota_snapshot();
+}
+
 // CMD_BOOST_START/CANCEL, CMD_BED_OFF and CMD_AWAY are rare (a quick-actions
 // tap, not a knob spin) — no coalescing, just run them in arrival order.
 static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
@@ -789,6 +838,27 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         nvs_flash_erase();
         esp_restart();
         break;
+    // Software update (M6), from Settings' "Software update" row.
+    case CMD_OTA_CHECK:
+        dial_ota_check();
+        commit_ota_snapshot();
+        break;
+    case CMD_OTA_APPLY: {
+        // Stale-tap guard: the row's confirm is only armed while AVAILABLE,
+        // but the store could have moved on (an unrelated auto-check landed,
+        // say) between the tap and the worker draining this command.
+        app_state_t st;
+        dial_state_get(&st);
+        if (st.ota.status != OTA_AVAILABLE) break;
+        s_ota_last_committed_pct = -100;   // guarantee the first progress commit fires
+        bool ok = dial_ota_download_and_apply(ota_progress_cb);
+        commit_ota_snapshot();
+        if (ok) {
+            ESP_LOGI(TAG, "OTA image ready; rebooting into it");
+            esp_restart();
+        }
+        break;
+    }
     default:
         break;   // CMD_SET_TEMP/CMD_TOGGLE_ON never reach here (see the drain loop)
     }
@@ -856,15 +926,23 @@ static void worker_task(void *arg)
     }
     ESP_LOGI(TAG, "device linked; %d tools", dial_mcp_list_tools_count());
 
-    with_auth_retry(poll_call, NULL, &disc, client_id);
+    bool first_poll_ok = with_auth_retry(poll_call, NULL, &disc, client_id);
     with_auth_retry(sched_call, NULL, &disc, client_id);   // M5: today's schedule, once up front
     dial_state_set_phase(PH_READY, NULL);
+    // OTA rollback health check (M6): reaching here with a successful poll
+    // proves Wi-Fi + TLS + OAuth + MCP + real device state all work on this
+    // image -- cancel the bootloader's pending-verify rollback timer if this
+    // boot came from an OTA install. (Also re-tried on the first successful
+    // poll in the steady-state loop below, in case this exact poll hit a
+    // transient failure -- ota_confirm_once() only ever does real work once.)
+    if (first_poll_ok) ota_confirm_once();
     knob_init();          // safe now: full board init done, router running
     dial_haptics_init();  // I2C bus is quiet by now; cal runs once, then NVS
 
     // ---- steady state: drain commands (coalescing per zone), gated poll ----
-    int64_t last_poll_us  = esp_timer_get_time();
-    int64_t last_sched_us = esp_timer_get_time();
+    int64_t last_poll_us      = esp_timer_get_time();
+    int64_t last_sched_us     = esp_timer_get_time();
+    int64_t last_ota_check_us = esp_timer_get_time();   // first auto-check ~24h after boot
     int poll_failures = 0;
     for (;;) {
         app_cmd_t cmd;
@@ -981,6 +1059,7 @@ static void worker_task(void *arg)
         if (with_auth_retry(poll_call, NULL, &disc, client_id)) {
             poll_failures = 0;
             dial_state_set_phase(PH_READY, NULL);
+            ota_confirm_once();
         } else if (++poll_failures >= 3) {
             dial_state_set_phase(PH_DEGRADED, dial_mcp_last_error());
         }
@@ -991,6 +1070,29 @@ static void worker_task(void *arg)
         if (esp_timer_get_time() - last_sched_us >= SCHED_INTERVAL_US) {
             with_auth_retry(sched_call, NULL, &disc, client_id);   // commits inside on success
             last_sched_us = esp_timer_get_time();
+        }
+
+        // Auto-check for firmware updates (M6): at most once per uptime-day,
+        // and only CHECKS (never applies) -- the settings row just gets a
+        // badge; the user still has to tap-confirm to install. Gated to a
+        // window that can never coincide with sleep or an in-progress boost:
+        // clock known, local hour in a daytime band, no zone mid-relief, and
+        // steady state. Re-evaluated (cheaply) every idle tick once due, but
+        // only actually calls dial_ota_check() -- and re-arms the 24h timer
+        // -- once all of those hold.
+        if (esp_timer_get_time() - last_ota_check_us >= OTA_AUTOCHECK_INTERVAL_US) {
+            app_state_t ota_st;
+            dial_state_get(&ota_st);
+            struct tm ota_lt;
+            bool in_window = ota_st.clock_valid && dial_time_now(&ota_lt) &&
+                              ota_lt.tm_hour >= 10 && ota_lt.tm_hour < 16;
+            bool relief_any = ota_st.zones[ZONE_A].relief_active ||
+                               ota_st.zones[ZONE_B].relief_active;
+            if (in_window && !relief_any && ota_st.phase == PH_READY) {
+                dial_ota_check();
+                commit_ota_snapshot();
+                last_ota_check_us = esp_timer_get_time();
+            }
         }
     }
 }

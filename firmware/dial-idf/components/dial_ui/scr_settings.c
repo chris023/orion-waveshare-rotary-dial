@@ -12,6 +12,7 @@
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
+#include "dial_ota.h"
 #include "esp_app_desc.h"
 
 #define ROW_H          76
@@ -21,8 +22,14 @@ static zone_idx_t s_zone = ZONE_A;   // side to return to on swipe-down
 
 static lv_obj_t *s_list;
 static lv_obj_t *s_val_my_side, *s_val_units, *s_val_haptics;
+static lv_obj_t *s_ota_err_lbl;   // second line under the Software update row, FAILED only
 
-typedef enum { CONFIRM_RELINK = 0, CONFIRM_WIFI, CONFIRM_FACTORY, CONFIRM_COUNT } confirm_id_t;
+// CONFIRM_OTA reuses the tap-twice pattern for "install now" (design-spec:
+// destructive-ish enough to want a confirm, since it reboots) — its value
+// label IS the Software update row's value (s_val_confirm[CONFIRM_OTA]),
+// exactly like the three rows below share their row's value label with
+// their confirm state.
+typedef enum { CONFIRM_RELINK = 0, CONFIRM_WIFI, CONFIRM_FACTORY, CONFIRM_OTA, CONFIRM_COUNT } confirm_id_t;
 static lv_obj_t   *s_val_confirm[CONFIRM_COUNT];
 static confirm_id_t s_armed = CONFIRM_COUNT;   // CONFIRM_COUNT = "none armed"
 static uint32_t     s_armed_at_ms;
@@ -148,6 +155,38 @@ static void row_factory_reset_cb(lv_event_t *e)
     dial_cmd_post(&cmd);
 }
 
+// Software update (M6). Behavior depends on the worker's last-known status:
+//  - CHECKING/DOWNLOADING: disabled (row stays visible, tap is a no-op) —
+//    the design spec calls for the screen to stay navigable, just not this
+//    row's tap during those two states.
+//  - AVAILABLE: tap-twice-to-confirm (a real install + reboot), same pattern
+//    as the destructive rows below.
+//  - IDLE/FAILED/READY_REBOOT: a single tap (re)runs the check — cheap and
+//    non-destructive, so no confirm needed (also how a FAILED row retries).
+static void row_ota_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    switch ((dial_ota_status_t)st.ota.status) {
+    case OTA_CHECKING:
+    case OTA_DOWNLOADING:
+        return;
+    case OTA_AVAILABLE: {
+        if (!confirm_tap(CONFIRM_OTA)) return;
+        dial_haptics_play(HAPTIC_CONFIRM);
+        app_cmd_t cmd = { .kind = CMD_OTA_APPLY };
+        dial_cmd_post(&cmd);
+        return;
+    }
+    default:   // OTA_IDLE, OTA_FAILED, OTA_READY_REBOOT
+        dial_haptics_play(HAPTIC_TICK);
+        app_cmd_t cmd = { .kind = CMD_OTA_CHECK };
+        dial_cmd_post(&cmd);
+        return;
+    }
+}
+
 /* ---- palette --------------------------------------------------------------*/
 
 static void apply_palette(lv_obj_t *scr)
@@ -164,6 +203,56 @@ static void apply_palette(lv_obj_t *scr)
             lv_obj_t *lbl = lv_obj_get_child(row, j);
             lv_obj_set_style_text_color(lbl, j == 0 ? pal->ink_primary : pal->ink_secondary, 0);
         }
+    }
+}
+
+// Renders the Software update row's value (+ the FAILED-only error line)
+// from the worker-owned app_state_t.ota mirror. Skipped entirely while a
+// CONFIRM_OTA tap is armed: confirm_tap() already wrote "Tap again to
+// confirm" into this same label, and a routine state commit landing mid-
+// window (a background poll, say) must not blow that away before the
+// second tap — exactly the reasoning nav_policy uses to keep this whole
+// screen sticky in main.c.
+static void render_ota_row(const app_state_t *st)
+{
+    lv_obj_t *val = s_val_confirm[CONFIRM_OTA];
+    if (!val || s_armed == CONFIRM_OTA) return;
+
+    const dial_palette_t *pal = PAL();
+    lv_obj_set_style_text_color(val, pal->ink_secondary, 0);
+    if (s_ota_err_lbl) lv_label_set_text(s_ota_err_lbl, "");
+
+    char buf[48];
+    switch ((dial_ota_status_t)st->ota.status) {
+    case OTA_CHECKING:
+        lv_label_set_text(val, "Checking...");
+        break;
+    case OTA_AVAILABLE:
+        snprintf(buf, sizeof(buf), "v%s available - tap to install", st->ota.latest);
+        lv_label_set_text(val, buf);
+        break;
+    case OTA_DOWNLOADING:
+        snprintf(buf, sizeof(buf), "Downloading %d%%", st->ota.progress_pct);
+        lv_label_set_text(val, buf);
+        break;
+    case OTA_READY_REBOOT:
+        lv_label_set_text(val, "Restarting...");
+        break;
+    case OTA_FAILED:
+        lv_label_set_text(val, "Update failed");
+        lv_obj_set_style_text_color(val, pal->warning, 0);
+        if (s_ota_err_lbl) {
+            lv_label_set_text(s_ota_err_lbl, st->ota.err);
+            lv_obj_set_style_text_color(s_ota_err_lbl, pal->warning, 0);
+        }
+        break;
+    case OTA_IDLE:
+    default: {
+        const esp_app_desc_t *desc = esp_app_get_description();
+        snprintf(buf, sizeof(buf), "v%s", desc->version);
+        lv_label_set_text(val, buf);
+        break;
+    }
     }
 }
 
@@ -192,6 +281,12 @@ static void create(lv_obj_t *scr, void *arg)
     make_row(s_list, "Wi-Fi reset",   row_wifi_reset_cb,    &s_val_confirm[CONFIRM_WIFI]);
     make_row(s_list, "Factory reset", row_factory_reset_cb, &s_val_confirm[CONFIRM_FACTORY]);
 
+    lv_obj_t *ota_row = make_row(s_list, "Software update", row_ota_cb, &s_val_confirm[CONFIRM_OTA]);
+    s_ota_err_lbl = lv_label_create(ota_row);
+    lv_obj_set_style_text_font(s_ota_err_lbl, &lv_font_montserrat_12, 0);
+    lv_label_set_text(s_ota_err_lbl, "");
+    lv_obj_align(s_ota_err_lbl, LV_ALIGN_RIGHT_MID, 0, 22);
+
     lv_obj_t *fw_val, *idf_val;
     make_row(s_list, "Firmware", NULL, &fw_val);
     make_row(s_list, "IDF",      NULL, &idf_val);
@@ -210,6 +305,7 @@ static void destroy(void)
     if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
     s_list = NULL;
     s_val_my_side = s_val_units = s_val_haptics = NULL;
+    s_ota_err_lbl = NULL;
     for (int i = 0; i < CONFIRM_COUNT; i++) s_val_confirm[i] = NULL;
     s_armed = CONFIRM_COUNT;
 }
@@ -218,6 +314,7 @@ static void on_state(const app_state_t *st)
 {
     if (!s_list) return;
     apply_palette(lv_obj_get_parent(s_list));
+    render_ota_row(st);
 
     const char *name = st->zones[st->ui_zone].user_name;
     char side_buf[24];

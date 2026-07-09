@@ -5,4 +5,9 @@
 cmake_minimum_required(VERSION 3.5)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 add_compile_options("-Wno-format")
+# Baseline app version (M6 OTA): esp_app_get_description()->version, compared
+# against GitHub Releases' tag_name by dial_ota. Bump per release; the tag
+# pushed to GitHub ("dial-vX.Y.Z") must match this for the update check to
+# ever consider a release "current" once installed.
+set(PROJECT_VER "1.0.0")
 project(orion-dial)
