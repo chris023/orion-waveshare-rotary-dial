@@ -11,6 +11,7 @@ extern const ui_screen_t scr_connecting;
 extern const ui_screen_t scr_wifi_portal;
 extern const ui_screen_t scr_oauth_qr;
 extern const ui_screen_t scr_dial;
+extern const ui_screen_t scr_tonight;
 extern const ui_screen_t scr_standby;
 extern const ui_screen_t scr_quick;
 extern const ui_screen_t scr_boost;

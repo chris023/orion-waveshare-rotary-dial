@@ -46,6 +46,10 @@ static const char *TAG = "app";
 #define KNOB_SETTLE_US    2500000    // 2.5s of no input before the bed is read back
 #define POLL_INTERVAL_US 10000000    // and at most every ~10s when idle
 
+// Sleep schedules (M5) don't change minute to minute — refresh far less
+// often than device state, piggybacked on the same idle poll path.
+#define SCHED_INTERVAL_US (30LL * 60 * 1000000)   // ~30 min
+
 #define BACKOFF_MIN_S  5
 #define BACKOFF_MAX_S 60
 
@@ -132,7 +136,16 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
             // no-op in ui_router_go (same id + same arg), so this is safe
             // every tick.
             screen_id_t cur = ui_router_current();
-            if (cur == SCR_QUICK || cur == SCR_BOOST || cur == SCR_SETTINGS) return cur;
+            // SCR_TONIGHT (M5) is reached by swipe and joins the sticky set
+            // below, but unlike QUICK/BOOST/SETTINGS (which only leave via a
+            // deliberate user action) it's also dismissed by the standby idle
+            // timeout — so that check must win over stickiness here, checked
+            // BEFORE folding TONIGHT into the sticky-set return.
+            if (cur == SCR_TONIGHT && dial_power_level() == DPWR_STANDBY) {
+                *arg = (void *)(uintptr_t)st->ui_zone;
+                return SCR_STANDBY;
+            }
+            if (cur == SCR_QUICK || cur == SCR_BOOST || cur == SCR_SETTINGS || cur == SCR_TONIGHT) return cur;
             // First link on a fresh device: pick a default side before
             // showing the dial (SCR_SIDEPICK). The `cur` half of this OR
             // also pins the screen when Settings' "My side" row reuses it on
@@ -163,11 +176,21 @@ static void mut_device_state(app_state_t *st, void *arg)
 {
     device_snapshot_t *d = arg;
     for (int z = 0; z < ZONE_COUNT; z++) {
-        // Names come from list_devices, not the state poll — keep them.
-        char keep[sizeof(st->zones[z].user_name)];
-        memcpy(keep, st->zones[z].user_name, sizeof(keep));
+        // Two things about a zone don't come from THIS call and must survive
+        // it: the name (list_devices) and the M5 sleep-schedule fields
+        // (get_sleep_schedules, refreshed on its own much slower cadence —
+        // see SCHED_INTERVAL_US) — save the whole zone, overwrite with the
+        // poll's fresh values, then restore just those fields.
+        zone_state_t keep = st->zones[z];
         st->zones[z] = d->zones[z];
-        memcpy(st->zones[z].user_name, keep, sizeof(keep));
+        strlcpy(st->zones[z].user_name, keep.user_name, sizeof(st->zones[z].user_name));
+        st->zones[z].sched_valid              = keep.sched_valid;
+        strlcpy(st->zones[z].sched_bedtime, keep.sched_bedtime, sizeof(st->zones[z].sched_bedtime));
+        st->zones[z].sched_bedtime_temp_c      = keep.sched_bedtime_temp_c;
+        strlcpy(st->zones[z].sched_wakeup, keep.sched_wakeup, sizeof(st->zones[z].sched_wakeup));
+        st->zones[z].sched_wakeup_temp_c        = keep.sched_wakeup_temp_c;
+        st->zones[z].sched_override_available   = keep.sched_override_available;
+        st->zones[z].sched_override_applied     = keep.sched_override_applied;
     }
     st->device_online = d->online;
     st->safety.error = d->safety_error;
@@ -246,6 +269,47 @@ static void mut_bed_off(app_state_t *st, void *arg)
 
 static void mut_away(app_state_t *st, void *arg) { st->away = *(bool *)arg; }
 
+// "Match my side" (M5): the worker reads the source zone's CURRENT store
+// values at command-execution time (handle_immediate_cmd), not whatever was
+// true when the sheet was opened, then set_zones the other zone to match —
+// this commit just mirrors that same (temp_c, on) pair into the store.
+typedef struct { zone_idx_t other; float temp_c; bool on; } match_args_t;
+static void mut_match_partner(app_state_t *st, void *arg)
+{
+    match_args_t *m = arg;
+    st->zones[m->other].temp_c = m->temp_c;
+    st->zones[m->other].on     = m->on;
+    st->ui_temp_f[m->other]    = -1;
+}
+
+// Tonight schedule (M5) snapshot from get_sleep_schedules — TODAY's entry
+// only, one per zone (via the worker's uuid map, see s_zone_uuid below).
+typedef struct {
+    bool  valid;
+    char  bedtime[6];
+    float bedtime_temp_c;
+    char  wakeup[6];
+    float wakeup_temp_c;
+    bool  override_available;
+    bool  override_applied;
+} sched_zone_t;
+typedef struct { sched_zone_t zones[ZONE_COUNT]; } sched_snapshot_t;
+
+static void mut_schedules(app_state_t *st, void *arg)
+{
+    sched_snapshot_t *s = arg;
+    for (int z = 0; z < ZONE_COUNT; z++) {
+        st->zones[z].sched_valid = s->zones[z].valid;
+        if (!s->zones[z].valid) continue;
+        strlcpy(st->zones[z].sched_bedtime, s->zones[z].bedtime, sizeof(st->zones[z].sched_bedtime));
+        st->zones[z].sched_bedtime_temp_c      = s->zones[z].bedtime_temp_c;
+        strlcpy(st->zones[z].sched_wakeup, s->zones[z].wakeup, sizeof(st->zones[z].sched_wakeup));
+        st->zones[z].sched_wakeup_temp_c        = s->zones[z].wakeup_temp_c;
+        st->zones[z].sched_override_available   = s->zones[z].override_available;
+        st->zones[z].sched_override_applied     = s->zones[z].override_applied;
+    }
+}
+
 static void mut_oauth_url(app_state_t *st, void *arg) { strlcpy(st->oauth_url, arg, sizeof(st->oauth_url)); }
 static void mut_retry_in(app_state_t *st, void *arg)  { st->retry_in_s = *(int *)arg; }
 static void mut_ap_ssid(app_state_t *st, void *arg)   { strlcpy(st->ap_ssid, arg, sizeof(st->ap_ssid)); }
@@ -269,6 +333,13 @@ static bool s_ui_clock_valid;
 /* ---- Orion MCP calls (worker task only) -------------------------------- */
 
 static char s_serial[16];
+
+// zone -> Orion user uuid (list_devices zones[].user.id), captured once in
+// orion_discover_device. get_sleep_schedules keys its "schedules" object by
+// this same uuid, so it's how orion_refresh_schedules matches a schedule
+// entry back to a zone. Worker-side only — deliberately NOT in app_state_t
+// (dial_state stays lean; nothing outside the worker needs the raw uuid).
+static char s_zone_uuid[ZONE_COUNT][40];
 
 static zone_idx_t zone_idx_from_id(const char *id)
 {
@@ -482,14 +553,132 @@ static bool orion_discover_device(void)
         cJSON_ArrayForEach(zn, cJSON_GetObjectItem(dev0, "zones")) {
             cJSON *id = cJSON_GetObjectItem(zn, "id");
             cJSON *user = cJSON_GetObjectItem(zn, "user");
+            if (!id || !id->valuestring) continue;
+            zone_idx_t zi = zone_idx_from_id(id->valuestring);
             cJSON *fn = user ? cJSON_GetObjectItem(user, "first_name") : NULL;
-            if (id && id->valuestring && fn && fn->valuestring)
-                strlcpy(ident.names[zone_idx_from_id(id->valuestring)],
-                        fn->valuestring, sizeof(ident.names[0]));
+            if (fn && fn->valuestring)
+                strlcpy(ident.names[zi], fn->valuestring, sizeof(ident.names[0]));
+            // Captured for orion_refresh_schedules (M5): get_sleep_schedules
+            // keys its per-user entries by this same uuid.
+            cJSON *uid = user ? cJSON_GetObjectItem(user, "id") : NULL;
+            if (uid && uid->valuestring)
+                strlcpy(s_zone_uuid[zi], uid->valuestring, sizeof(s_zone_uuid[0]));
         }
         if (ok) dial_state_commit(mut_identity, &ident);
     }
     cJSON_Delete(root);
+    return ok;
+}
+
+// "Match my side" (M5): set_zones the OTHER zone to (temp_c, on) — atomic so
+// the partner's side can never land with the temp changed but the power
+// state not (or vice versa) from a partial failure.
+static bool orion_match_partner(void *arg)
+{
+    match_args_t *m = arg;
+    char args[192];
+    snprintf(args, sizeof(args),
+             "{\"serial\":\"%s\",\"zones\":[{\"id\":\"%s\",\"temp\":%.1f,\"on\":%s}]}",
+             s_serial, zone_id_str(m->other), m->temp_c, m->on ? "true" : "false");
+    char *r = NULL;
+    bool ok = dial_mcp_call_tool("set_zones", args, &r);
+    if (!ok) ESP_LOGW(TAG, "set_zones (match partner) failed: %s", dial_mcp_last_error());
+    free(r);
+    return ok;
+}
+
+// get_sleep_schedules {} returns {schedules: {"<uuid>": [ {day:0-6, bedtime,
+// bedtime_temp, wakeup, wakeup_temp, is_override_available,
+// is_override_applied, ...} x7 ]}} — one entry per user uuid. Pulls out
+// TODAY's entry (day == dial_time_now's tm_wday) per zone, matched via
+// s_zone_uuid. Requires a valid clock (to know which weekday "today" is);
+// skips silently if the clock isn't set yet, same as the rest of the app
+// treats an unsynced SNTP as "wait, don't guess".
+static bool orion_refresh_schedules(void)
+{
+    struct tm lt;
+    if (!dial_time_now(&lt)) return false;
+    int today = lt.tm_wday;
+
+    char *json = NULL;
+    if (!dial_mcp_call_tool("get_sleep_schedules", "{}", &json) || !json) return false;
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root) return false;
+
+    sched_snapshot_t sc = { 0 };
+    cJSON *schedules = cJSON_GetObjectItem(root, "schedules");
+    if (cJSON_IsObject(schedules)) {
+        for (int z = 0; z < ZONE_COUNT; z++) {
+            if (!s_zone_uuid[z][0]) continue;
+            cJSON *arr = cJSON_GetObjectItem(schedules, s_zone_uuid[z]);
+            if (!cJSON_IsArray(arr)) continue;
+            cJSON *entry;
+            cJSON_ArrayForEach(entry, arr) {
+                cJSON *day = cJSON_GetObjectItem(entry, "day");
+                if (!cJSON_IsNumber(day) || (int)day->valuedouble != today) continue;
+
+                sched_zone_t *zs = &sc.zones[z];
+                zs->valid = true;
+                cJSON *bt  = cJSON_GetObjectItem(entry, "bedtime");
+                cJSON *btt = cJSON_GetObjectItem(entry, "bedtime_temp");
+                cJSON *wk  = cJSON_GetObjectItem(entry, "wakeup");
+                cJSON *wkt = cJSON_GetObjectItem(entry, "wakeup_temp");
+                if (bt && bt->valuestring) strlcpy(zs->bedtime, bt->valuestring, sizeof(zs->bedtime));
+                if (cJSON_IsNumber(btt)) zs->bedtime_temp_c = (float)btt->valuedouble;
+                if (wk && wk->valuestring) strlcpy(zs->wakeup, wk->valuestring, sizeof(zs->wakeup));
+                if (cJSON_IsNumber(wkt)) zs->wakeup_temp_c = (float)wkt->valuedouble;
+                zs->override_available = cJSON_IsTrue(cJSON_GetObjectItem(entry, "is_override_available"));
+                zs->override_applied   = cJSON_IsTrue(cJSON_GetObjectItem(entry, "is_override_applied"));
+                break;   // one entry per day
+            }
+        }
+    }
+    cJSON_Delete(root);
+    dial_state_commit(mut_schedules, &sc);
+    return true;
+}
+
+// override_sleep_schedule_tonight {fields:{...}} — same field vocabulary as
+// get_sleep_schedules, ack only. Only sends the fields the caller actually
+// changed (a/b == -1 means "leave alone"). Targets the OAuth token's own
+// account implicitly (no user_id in the confirmed schema) — callers must
+// only invoke this for ZONE_A (see the CMD_TONIGHT_OVERRIDE comment in
+// dial_state.h for why).
+typedef struct { int wakeup_min; int bedtime_temp_f; } tonight_override_args_t;
+static bool orion_tonight_override(void *arg)
+{
+    tonight_override_args_t *a = arg;
+    char fields[80] = "";
+    if (a->wakeup_min >= 0) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "\"wakeup\":\"%02d:%02d\"", a->wakeup_min / 60, a->wakeup_min % 60);
+        strlcat(fields, buf, sizeof(fields));
+    }
+    if (a->bedtime_temp_f >= 0) {
+        if (fields[0]) strlcat(fields, ",", sizeof(fields));
+        char buf[32];
+        snprintf(buf, sizeof(buf), "\"bedtime_temp\":%.1f", dial_f_to_c(a->bedtime_temp_f));
+        strlcat(fields, buf, sizeof(fields));
+    }
+    if (!fields[0]) return true;   // nothing to change
+
+    char args[128];
+    snprintf(args, sizeof(args), "{\"fields\":{%s}}", fields);
+    char *r = NULL;
+    bool ok = dial_mcp_call_tool("override_sleep_schedule_tonight", args, &r);
+    if (!ok) ESP_LOGW(TAG, "override_sleep_schedule_tonight failed: %s", dial_mcp_last_error());
+    free(r);
+    return ok;
+}
+
+static bool orion_tonight_revert(void *arg)
+{
+    (void)arg;
+    char *r = NULL;
+    bool ok = dial_mcp_call_tool("revert_sleep_schedule_override", "{}", &r);
+    if (!ok) ESP_LOGW(TAG, "revert_sleep_schedule_override failed: %s", dial_mcp_last_error());
+    free(r);
     return ok;
 }
 
@@ -521,6 +710,7 @@ static bool with_auth_retry(bool (*call)(void *), void *arg,
 }
 
 static bool poll_call(void *arg) { (void)arg; return orion_refresh_state(); }
+static bool sched_call(void *arg) { (void)arg; return orion_refresh_schedules(); }
 
 typedef struct { zone_idx_t zone; const char *field_json; } set_zone_args_t;
 static bool set_zone_call(void *arg)
@@ -554,6 +744,33 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
             dial_state_commit(mut_away, &away);
         break;
     }
+    case CMD_MATCH_PARTNER: {
+        // Read the source zone's CURRENT value at execution time (not
+        // whatever was true when the sheet was opened — a burst of knob
+        // turns could have landed in between).
+        app_state_t st;
+        dial_state_get(&st);
+        zone_idx_t mine  = cmd->zone;
+        zone_idx_t other = (mine == ZONE_A) ? ZONE_B : ZONE_A;
+        match_args_t m = { other, st.zones[mine].temp_c, st.zones[mine].on };
+        if (with_auth_retry(orion_match_partner, &m, disc, client_id))
+            dial_state_commit(mut_match_partner, &m);
+        break;
+    }
+    // Tonight schedule (M5) — ZONE_A only, see dial_state.h's comment beside
+    // CMD_TONIGHT_OVERRIDE for why the partner side is dropped here.
+    case CMD_TONIGHT_OVERRIDE: {
+        if (cmd->zone != ZONE_A) break;
+        tonight_override_args_t a = { cmd->a, cmd->b };
+        if (with_auth_retry(orion_tonight_override, &a, disc, client_id))
+            with_auth_retry(sched_call, NULL, disc, client_id);   // refresh so override_applied flips immediately
+        break;
+    }
+    case CMD_TONIGHT_REVERT:
+        if (cmd->zone != ZONE_A) break;
+        if (with_auth_retry(orion_tonight_revert, NULL, disc, client_id))
+            with_auth_retry(sched_call, NULL, disc, client_id);
+        break;
     // Settings (M4) destructive actions: each erases some NVS state and
     // reboots — there's no follow-up state commit because esp_restart()
     // never returns.
@@ -640,12 +857,14 @@ static void worker_task(void *arg)
     ESP_LOGI(TAG, "device linked; %d tools", dial_mcp_list_tools_count());
 
     with_auth_retry(poll_call, NULL, &disc, client_id);
+    with_auth_retry(sched_call, NULL, &disc, client_id);   // M5: today's schedule, once up front
     dial_state_set_phase(PH_READY, NULL);
     knob_init();          // safe now: full board init done, router running
     dial_haptics_init();  // I2C bus is quiet by now; cal runs once, then NVS
 
     // ---- steady state: drain commands (coalescing per zone), gated poll ----
-    int64_t last_poll_us = esp_timer_get_time();
+    int64_t last_poll_us  = esp_timer_get_time();
+    int64_t last_sched_us = esp_timer_get_time();
     int poll_failures = 0;
     for (;;) {
         app_cmd_t cmd;
@@ -711,11 +930,30 @@ static void worker_task(void *arg)
         }
 
         // Night mode: warm-dim + quiet haptics while the household sleeps.
-        // Fixed 21:00-07:00 window until the schedule screens land (M5 pulls
-        // the real bedtime/wake from get_sleep_schedules).
+        // Real window (M5): bedtime-30min -> wake+30min from ZONE_A's
+        // schedule (the dial's own side — see CMD_TONIGHT_OVERRIDE's comment
+        // for why only ZONE_A's schedule is trusted); falls back to a fixed
+        // 21:00-07:00 window until that schedule is known.
         struct tm lt;
         if (dial_time_now(&lt)) {
-            bool night = (lt.tm_hour >= 21 || lt.tm_hour < 7);
+            int now_min = lt.tm_hour * 60 + lt.tm_min;
+            bool night;
+            app_state_t sched_st;
+            dial_state_get(&sched_st);
+            const zone_state_t *za = &sched_st.zones[ZONE_A];
+            int bed_min, wake_min;
+            if (za->sched_valid &&
+                dial_parse_hhmm(za->sched_bedtime, &bed_min) &&
+                dial_parse_hhmm(za->sched_wakeup, &wake_min)) {
+                int start = ((bed_min - 30) % 1440 + 1440) % 1440;
+                int end   = (wake_min + 30) % 1440;
+                // The window almost always crosses midnight (bedtime ~21:00,
+                // wake ~07:00 next day); handle the wrap explicitly.
+                night = (start <= end) ? (now_min >= start && now_min < end)
+                                       : (now_min >= start || now_min < end);
+            } else {
+                night = (lt.tm_hour >= 21 || lt.tm_hour < 7);
+            }
             dial_power_set_night(night);
             // Swap the UI palette too, and force a re-render — screens read
             // PAL() from on_state, so a bare palette swap without a commit
@@ -747,6 +985,13 @@ static void worker_task(void *arg)
             dial_state_set_phase(PH_DEGRADED, dial_mcp_last_error());
         }
         last_poll_us = esp_timer_get_time();
+
+        // Sleep schedules change far less often than device state — piggyback
+        // on this same quiet-idle gate, just at a much longer interval.
+        if (esp_timer_get_time() - last_sched_us >= SCHED_INTERVAL_US) {
+            with_auth_retry(sched_call, NULL, &disc, client_id);   // commits inside on success
+            last_sched_us = esp_timer_get_time();
+        }
     }
 }
 

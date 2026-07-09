@@ -20,6 +20,7 @@ typedef enum {
     SCR_WIFI_PORTAL,      // SoftAP join instructions + QR
     SCR_OAUTH_QR,         // Orion link QR
     SCR_DIAL,             // the temperature dial (arg: zone_idx_t)
+    SCR_TONIGHT,          // tonight's schedule face (M5, arg: unused/NULL — always ZONE_A's schedule)
     SCR_STANDBY,          // always-on clock face (arg: zone_idx_t to wake to)
     SCR_QUICK,            // quick-actions bottom sheet (arg: zone_idx_t it was opened from)
     SCR_BOOST,            // boost duration picker (arg: (zone_idx_t<<1)|heat)

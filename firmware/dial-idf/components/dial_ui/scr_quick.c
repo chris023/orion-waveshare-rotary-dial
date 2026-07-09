@@ -25,8 +25,8 @@
 static lv_obj_t *s_sheet;
 static lv_obj_t *s_grab;
 static lv_obj_t *s_list;
-static lv_obj_t *s_row_boost_heat, *s_row_boost_cool, *s_row_bed_off, *s_row_away, *s_row_settings;
-static lv_obj_t *s_lbl_boost_heat, *s_lbl_boost_cool, *s_lbl_bed_off, *s_lbl_away, *s_lbl_settings;
+static lv_obj_t *s_row_boost_heat, *s_row_boost_cool, *s_row_match, *s_row_bed_off, *s_row_away, *s_row_settings;
+static lv_obj_t *s_lbl_boost_heat, *s_lbl_boost_cool, *s_lbl_match, *s_lbl_bed_off, *s_lbl_away, *s_lbl_settings;
 
 static zone_idx_t s_zone = ZONE_A;   // the dial side this sheet was opened from
 static bool s_away;                  // last-known away flag, for the toggle
@@ -74,6 +74,18 @@ static void go_boost(bool heat)
 static void row_boost_heat_cb(lv_event_t *e) { (void)e; go_boost(true); }
 static void row_boost_cool_cb(lv_event_t *e) { (void)e; go_boost(false); }
 
+// "Match my side" (M5): worker reads the CURRENT store snapshot for s_zone
+// at command-execution time and set_zones the other zone to match — nothing
+// to build here, the zone is enough context.
+static void row_match_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_CONFIRM);
+    app_cmd_t cmd = { .kind = CMD_MATCH_PARTNER, .zone = s_zone };
+    dial_cmd_post(&cmd);
+    dismiss();
+}
+
 static void row_bed_off_cb(lv_event_t *e)
 {
     (void)e;
@@ -108,7 +120,7 @@ static void apply_palette(void)
     lv_obj_set_style_bg_color(s_sheet, pal->surface, 0);
     lv_obj_set_style_bg_color(s_grab, pal->ink_secondary, 0);
 
-    lv_obj_t *labels[] = { s_lbl_boost_heat, s_lbl_boost_cool, s_lbl_bed_off, s_lbl_away, s_lbl_settings };
+    lv_obj_t *labels[] = { s_lbl_boost_heat, s_lbl_boost_cool, s_lbl_match, s_lbl_bed_off, s_lbl_away, s_lbl_settings };
     for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++)
         lv_obj_set_style_text_color(labels[i], pal->ink_primary, 0);
 }
@@ -172,6 +184,8 @@ static void create(lv_obj_t *scr, void *arg)
     lv_label_set_text(s_lbl_boost_heat, "Boost heat");
     s_row_boost_cool = make_row(s_list, row_boost_cool_cb, &s_lbl_boost_cool);
     lv_label_set_text(s_lbl_boost_cool, "Boost cool");
+    s_row_match      = make_row(s_list, row_match_cb, &s_lbl_match);
+    lv_label_set_text(s_lbl_match, "Match my side");
     s_row_bed_off    = make_row(s_list, row_bed_off_cb, &s_lbl_bed_off);
     lv_label_set_text(s_lbl_bed_off, "Bed off");
     s_row_away       = make_row(s_list, row_away_cb, &s_lbl_away);
@@ -187,8 +201,8 @@ static void destroy(void)
 {
     if (s_sheet) lv_anim_del(s_sheet, NULL);
     s_sheet = s_grab = s_list = NULL;
-    s_row_boost_heat = s_row_boost_cool = s_row_bed_off = s_row_away = s_row_settings = NULL;
-    s_lbl_boost_heat = s_lbl_boost_cool = s_lbl_bed_off = s_lbl_away = s_lbl_settings = NULL;
+    s_row_boost_heat = s_row_boost_cool = s_row_match = s_row_bed_off = s_row_away = s_row_settings = NULL;
+    s_lbl_boost_heat = s_lbl_boost_cool = s_lbl_match = s_lbl_bed_off = s_lbl_away = s_lbl_settings = NULL;
 }
 
 static void on_state(const app_state_t *st)

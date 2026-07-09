@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <math.h>
 
 /*
@@ -41,6 +42,20 @@ typedef enum { ZONE_A = 0, ZONE_B = 1, ZONE_COUNT = 2 } zone_idx_t;
 static inline int   dial_c_to_f(float c) { return (int)lroundf(c * 1.8f + 32.0f); }
 static inline float dial_f_to_c(int f)   { return roundf(((f - 32) / 1.8f) * 10.0f) / 10.0f; }
 
+// Parse a schedule "HH:MM" (24h) time string into minutes-from-midnight.
+// Returns false (leaving *out_min untouched) on any malformed input. Shared
+// by the worker (real night-window calc) and SCR_TONIGHT (display + the wake
+// picker), both of which only ever look at zone_state_t's sched_bedtime/
+// sched_wakeup strings below.
+static inline bool dial_parse_hhmm(const char *s, int *out_min)
+{
+    int hh, mm;
+    if (!s || sscanf(s, "%d:%d", &hh, &mm) != 2) return false;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return false;
+    *out_min = hh * 60 + mm;
+    return true;
+}
+
 typedef struct {
     float temp_c;            // setpoint (top-level zones[].temp)
     float actual_c;          // measured water temp (status.zones[].temp); <0 = unknown
@@ -56,6 +71,19 @@ typedef struct {
     bool    relief_heat;      // true = heat, false = cool
     int64_t relief_end_ms;    // epoch MILLISECONDS (API's units, not seconds)
     float   relief_prev_temp_c;
+
+    // Tonight's sleep schedule (M5), from get_sleep_schedules — TODAY's entry
+    // only (day == dial_time_now's tm_wday), matched to this zone via the
+    // worker's zone->uuid map (list_devices zones[].user.id). sched_valid
+    // false means either the clock isn't set yet or the worker hasn't
+    // resolved this zone's schedule (no user uuid, or no entry for today).
+    bool  sched_valid;
+    char  sched_bedtime[6];        // "HH:MM", 24h
+    float sched_bedtime_temp_c;
+    char  sched_wakeup[6];         // "HH:MM", 24h
+    float sched_wakeup_temp_c;
+    bool  sched_override_applied;
+    bool  sched_override_available;
 } zone_state_t;
 
 typedef struct {
@@ -164,6 +192,21 @@ typedef enum {
     CMD_BOOST_CANCEL,  // zone ignored — cancels relief on every zone
     CMD_BED_OFF,       // zone ignored — both zones off, atomically
     CMD_AWAY,          // a=1 away / 0 home
+    CMD_MATCH_PARTNER, // zone = mine; worker reads the store at execution
+                       // time and set_zones the OTHER zone to my (temp_c, on)
+
+    // Tonight schedule (M5). ONLY ZONE_A is supported: override_sleep_
+    // schedule_tonight's confirmed field vocabulary has no user_id — it
+    // implicitly targets the OAuth token's own account, and with two users
+    // sharing a bed we have no reliable way to tell which of the two uuids
+    // get_sleep_schedules returns is the token owner. Simplest safe answer:
+    // only the dial's own side (ZONE_A, per D3) offers the override control.
+    // Both commands are dropped by the worker if cmd->zone != ZONE_A.
+    CMD_TONIGHT_OVERRIDE, // zone (must be ZONE_A); a = new wakeup minutes-
+                          // from-midnight (0-1439) or -1 to keep; b = new
+                          // bedtime_temp_f or -1 to keep (unused by today's
+                          // wake-only picker; reserved for a future control)
+    CMD_TONIGHT_REVERT,   // zone (must be ZONE_A) — reverts today's override
 
     // Settings (M4) destructive actions — each erases some NVS state and
     // reboots. Handled in main.c's handle_immediate_cmd like the others
