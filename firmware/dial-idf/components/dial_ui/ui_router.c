@@ -1,0 +1,103 @@
+#include "ui_router.h"
+
+#include <string.h>
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static const char *TAG = "ui_router";
+
+static const ui_screen_t *s_screens[SCR_COUNT];
+static screen_id_t        s_current = SCR_COUNT;   // none yet
+static lv_timer_t        *s_dispatch;
+static uint32_t           s_rendered_gen;
+
+// Knob detents accumulated from the decoder's esp_timer task; drained by the
+// dispatcher in the LVGL task. Guarded by a spinlock: the decoder must never
+// block (it shares its task with lv_tick_inc), and this critical section is
+// a handful of instructions.
+static portMUX_TYPE s_knob_mux = portMUX_INITIALIZER_UNLOCKED;
+static int32_t      s_knob_accum;
+
+void ui_router_register(screen_id_t id, const ui_screen_t *scr)
+{
+    configASSERT(id < SCR_COUNT);
+    s_screens[id] = scr;
+}
+
+void ui_router_knob_input(int detents)
+{
+    taskENTER_CRITICAL(&s_knob_mux);
+    s_knob_accum += detents;
+    taskEXIT_CRITICAL(&s_knob_mux);
+}
+
+screen_id_t ui_router_current(void) { return s_current; }
+
+// Swipe gestures arrive on the screen object; forward to the active screen.
+static void gesture_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
+    const ui_screen_t *scr = (s_current < SCR_COUNT) ? s_screens[s_current] : NULL;
+    if (scr && scr->on_gesture && scr->on_gesture(dir))
+        dial_state_stamp_input();
+}
+
+void ui_router_go(screen_id_t id, void *arg, lv_scr_load_anim_t anim)
+{
+    configASSERT(id < SCR_COUNT && s_screens[id]);
+    if (id == s_current) return;
+
+    const ui_screen_t *old = (s_current < SCR_COUNT) ? s_screens[s_current] : NULL;
+    if (old && old->destroy) old->destroy();
+
+    lv_obj_t *scr = lv_obj_create(NULL);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(scr, gesture_cb, LV_EVENT_GESTURE, NULL);
+    s_current = id;
+    s_screens[id]->create(scr, arg);
+
+    // auto_del frees the previous screen (and its widgets) after the animation.
+    lv_scr_load_anim(scr, anim, anim == LV_SCR_LOAD_ANIM_NONE ? 0 : 220, 0, true);
+
+    // Render current state immediately so the new screen never shows stale "--".
+    app_state_t st;
+    dial_state_get(&st);
+    s_rendered_gen = st.generation;
+    if (s_screens[id]->on_state) s_screens[id]->on_state(&st);
+}
+
+// Runs in the LVGL task every 50ms: drain knob detents into the active screen
+// and re-render when the state generation moved. This is the ONLY place the
+// worker's commits reach LVGL, so the worker never needs the LVGL lock.
+static void dispatch_tick(lv_timer_t *t)
+{
+    (void)t;
+    const ui_screen_t *scr = (s_current < SCR_COUNT) ? s_screens[s_current] : NULL;
+    if (!scr) return;
+
+    taskENTER_CRITICAL(&s_knob_mux);
+    int32_t detents = s_knob_accum;
+    s_knob_accum = 0;
+    taskEXIT_CRITICAL(&s_knob_mux);
+
+    if (detents != 0 && scr->on_knob && scr->on_knob((int)detents))
+        dial_state_stamp_input();
+
+    app_state_t st;
+    dial_state_get(&st);
+    if (st.generation != s_rendered_gen) {
+        s_rendered_gen = st.generation;
+        if (scr->on_state) scr->on_state(&st);
+    }
+}
+
+void ui_router_start(screen_id_t first, void *arg)
+{
+    configASSERT(!s_dispatch);
+    s_dispatch = lv_timer_create(dispatch_tick, 50, NULL);
+    ui_router_go(first, arg, LV_SCR_LOAD_ANIM_NONE);
+    ESP_LOGI(TAG, "router up, screen %d", first);
+}

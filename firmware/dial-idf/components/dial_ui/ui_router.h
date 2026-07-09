@@ -1,0 +1,56 @@
+#pragma once
+#include <stdbool.h>
+#include "lvgl.h"
+#include "dial_state.h"
+
+/*
+ * Screen router. One lv_obj_t screen per view, created on enter and destroyed
+ * on exit (auto_del via lv_scr_load_anim), driven by a vtable per screen.
+ *
+ * Threading contract: EVERY router entry point runs in the LVGL task —
+ * ui_router_go/back are only legal from LVGL callbacks or the dispatcher
+ * timer, so screens never take the LVGL lock themselves. The knob decoder
+ * (esp_timer task) and the worker never call the router: the knob feeds an
+ * atomic detent accumulator that the dispatcher drains, and the worker just
+ * commits state (the dispatcher notices the generation change).
+ */
+
+typedef enum {
+    SCR_CONNECTING = 0,   // boot/progress/status text
+    SCR_WIFI_PORTAL,      // SoftAP join instructions + QR
+    SCR_OAUTH_QR,         // Orion link QR
+    SCR_DIAL,             // the temperature dial (arg: zone_idx_t)
+    SCR_ERROR,            // offline / degraded, with retry countdown
+    SCR_COUNT,
+} screen_id_t;
+
+typedef struct {
+    // Build the widget tree onto `scr` (an empty lv_obj screen). `arg` is the
+    // value passed to ui_router_go. Then render the first state via on_state.
+    void (*create)(lv_obj_t *scr, void *arg);
+    // Widgets are being destroyed (screen unloaded): null your pointers.
+    void (*destroy)(void);
+    // Re-render from a fresh snapshot (state generation changed).
+    void (*on_state)(const app_state_t *st);
+    // Knob turned by `detents` (+CW/-CCW). Return true if consumed.
+    bool (*on_knob)(int detents);
+    // Horizontal swipe. dir = LV_DIR_LEFT/RIGHT. Return true if consumed.
+    bool (*on_gesture)(lv_dir_t dir);
+} ui_screen_t;
+
+// Register a screen implementation (call for each screen before ui_router_start).
+void ui_router_register(screen_id_t id, const ui_screen_t *scr);
+
+// Create the dispatcher timer and show the first screen. LVGL must be up.
+// Call from a context holding the LVGL lock (or before the LVGL task runs).
+void ui_router_start(screen_id_t first, void *arg);
+
+// Navigate. anim: LV_SCR_LOAD_ANIM_NONE/FADE_ON/MOVE_LEFT/... LVGL task only.
+void ui_router_go(screen_id_t id, void *arg, lv_scr_load_anim_t anim);
+
+// The currently shown screen.
+screen_id_t ui_router_current(void);
+
+// Knob input from any task: accumulate detents; the dispatcher drains them
+// into the active screen's on_knob within one dispatch period (~50ms).
+void ui_router_knob_input(int detents);

@@ -14,6 +14,7 @@
 #include "dial_wifi.h"
 #include "dial_oauth.h"
 #include "dial_mcp.h"
+#include "dial_time.h"
 #include "bidi_switch_knob.h"
 #include "secrets.h"
 #include "cJSON.h"
@@ -364,6 +365,9 @@ static void oauth_task(void *arg)
         cJSON *serial = dev0 ? cJSON_GetObjectItem(dev0, "serial_number") : NULL;
         if (serial && serial->valuestring)
             strlcpy(s_serial, serial->valuestring, sizeof(s_serial));
+        cJSON *tz = dev0 ? cJSON_GetObjectItem(dev0, "timezone") : NULL;
+        if (tz && tz->valuestring)
+            dial_time_set_iana_tz(tz->valuestring);
         if (root) cJSON_Delete(root);
     }
     free(devices);
@@ -456,6 +460,7 @@ void app_main(void)
     ui_show_msg("Connecting to Wi-Fi...");
     dial_net_bringup();
     ESP_LOGI(TAG, "Wi-Fi ready");
+    dial_time_start();
     ui_show_msg("Linking to Orion...");
 
     // OAuth runs in its own task with a generous stack: the TLS handshake plus
