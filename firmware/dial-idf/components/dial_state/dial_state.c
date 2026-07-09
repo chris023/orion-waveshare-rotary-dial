@@ -3,9 +3,11 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "esp_timer.h"
 
 static SemaphoreHandle_t s_mux;
+static QueueHandle_t     s_cmd_q;
 static app_state_t       s_state;
 
 // Written from LVGL task (touch), knob decoder task, and worker; read from the
@@ -16,13 +18,33 @@ static int64_t s_last_input_us;
 void dial_state_init(void)
 {
     s_mux = xSemaphoreCreateMutex();
-    configASSERT(s_mux);
+    s_cmd_q = xQueueCreate(16, sizeof(app_cmd_t));
+    configASSERT(s_mux && s_cmd_q);
     memset(&s_state, 0, sizeof(s_state));
     s_state.phase = PH_BOOT;
     for (int z = 0; z < ZONE_COUNT; z++) {
         s_state.ui_temp_f[z]       = -1;
         s_state.zones[z].actual_c  = -1.0f;
     }
+}
+
+void dial_state_set_ui_temp(zone_idx_t zone, int temp_f)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.ui_temp_f[zone] = temp_f;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+}
+
+void dial_cmd_post(const app_cmd_t *cmd)
+{
+    dial_state_stamp_input();
+    xQueueSend(s_cmd_q, cmd, 0);
+}
+
+bool dial_cmd_receive(app_cmd_t *out, int timeout_ms)
+{
+    return xQueueReceive(s_cmd_q, out, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
 void dial_state_get(app_state_t *out)

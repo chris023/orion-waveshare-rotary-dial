@@ -41,6 +41,12 @@ typedef struct {
 // Register a screen implementation (call for each screen before ui_router_start).
 void ui_router_register(screen_id_t id, const ui_screen_t *scr);
 
+// App-level navigation policy: given a fresh snapshot, which screen should be
+// showing? Return the screen id (and set *arg). Runs in the dispatcher after
+// every state change; returning the current screen/arg is a no-op.
+typedef screen_id_t (*ui_nav_policy_t)(const app_state_t *st, void **arg);
+void ui_router_set_nav_policy(ui_nav_policy_t policy);
+
 // Create the dispatcher timer and show the first screen. LVGL must be up.
 // Call from a context holding the LVGL lock (or before the LVGL task runs).
 void ui_router_start(screen_id_t first, void *arg);

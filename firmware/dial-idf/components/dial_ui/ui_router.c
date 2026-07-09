@@ -9,6 +9,7 @@ static const char *TAG = "ui_router";
 
 static const ui_screen_t *s_screens[SCR_COUNT];
 static screen_id_t        s_current = SCR_COUNT;   // none yet
+static void              *s_current_arg;
 static lv_timer_t        *s_dispatch;
 static uint32_t           s_rendered_gen;
 
@@ -18,6 +19,9 @@ static uint32_t           s_rendered_gen;
 // a handful of instructions.
 static portMUX_TYPE s_knob_mux = portMUX_INITIALIZER_UNLOCKED;
 static int32_t      s_knob_accum;
+
+static ui_nav_policy_t s_nav_policy;
+void ui_router_set_nav_policy(ui_nav_policy_t policy) { s_nav_policy = policy; }
 
 void ui_router_register(screen_id_t id, const ui_screen_t *scr)
 {
@@ -45,10 +49,13 @@ static void gesture_cb(lv_event_t *e)
         dial_state_stamp_input();
 }
 
+// Re-entering the current screen with a DIFFERENT arg rebuilds it (the dial
+// screen swaps zones this way); with the same arg it's a no-op, so
+// phase-driven navigation can call this every tick harmlessly.
 void ui_router_go(screen_id_t id, void *arg, lv_scr_load_anim_t anim)
 {
     configASSERT(id < SCR_COUNT && s_screens[id]);
-    if (id == s_current) return;
+    if (id == s_current && arg == s_current_arg) return;
 
     const ui_screen_t *old = (s_current < SCR_COUNT) ? s_screens[s_current] : NULL;
     if (old && old->destroy) old->destroy();
@@ -57,6 +64,7 @@ void ui_router_go(screen_id_t id, void *arg, lv_scr_load_anim_t anim)
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(scr, gesture_cb, LV_EVENT_GESTURE, NULL);
     s_current = id;
+    s_current_arg = arg;
     s_screens[id]->create(scr, arg);
 
     // auto_del frees the previous screen (and its widgets) after the animation.
@@ -90,7 +98,13 @@ static void dispatch_tick(lv_timer_t *t)
     dial_state_get(&st);
     if (st.generation != s_rendered_gen) {
         s_rendered_gen = st.generation;
-        if (scr->on_state) scr->on_state(&st);
+        if (s_nav_policy) {
+            void *arg = s_current_arg;
+            screen_id_t want = s_nav_policy(&st, &arg);
+            ui_router_go(want, arg, LV_SCR_LOAD_ANIM_FADE_ON);  // no-op if unchanged
+            scr = s_screens[s_current];
+        }
+        if (scr && scr->on_state) scr->on_state(&st);
     }
 }
 

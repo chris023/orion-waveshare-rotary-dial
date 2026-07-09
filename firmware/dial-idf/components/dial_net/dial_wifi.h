@@ -12,6 +12,19 @@
  *   dial_net_bringup();   // connects, running the portal first if needed
  */
 
+// Connection lifecycle events, delivered from the Wi-Fi event task (keep
+// handlers tiny and non-blocking — post to a queue / set state, don't work).
+typedef enum {
+    DIAL_NET_EV_CONNECTING,   // trying stored creds
+    DIAL_NET_EV_PORTAL,       // captive portal is up, waiting for creds
+    DIAL_NET_EV_GOT_IP,       // connected (also fires on every reconnect)
+    DIAL_NET_EV_LOST,         // established connection dropped; auto-retrying
+} dial_net_event_t;
+typedef void (*dial_net_event_cb_t)(dial_net_event_t ev);
+
+// Register the (single) lifecycle listener. Call before dial_net_bringup.
+void dial_net_on_event(dial_net_event_cb_t cb);
+
 // Initialize NVS + netif + the Wi-Fi driver + event loop. Call once, early.
 void dial_net_init(void);
 

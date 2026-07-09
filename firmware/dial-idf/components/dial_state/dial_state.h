@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 
 /*
  * The single app-state store. The network worker (and only it) commits device
@@ -30,6 +31,15 @@ typedef enum {
 } conn_phase_t;
 
 typedef enum { ZONE_A = 0, ZONE_B = 1, ZONE_COUNT = 2 } zone_idx_t;
+
+// Display range in °F (device range is 10–45°C ≈ 50–113°F; keep the familiar
+// bounds the app used). Orion takes °C; the device's own °F lookup table is the
+// linear formula rounded to 0.1°C, so the linear conversion round-trips exactly.
+#define DIAL_TEMP_MIN_F 55
+#define DIAL_TEMP_MAX_F 110
+
+static inline int   dial_c_to_f(float c) { return (int)lroundf(c * 1.8f + 32.0f); }
+static inline float dial_f_to_c(int f)   { return roundf(((f - 32) / 1.8f) * 10.0f) / 10.0f; }
 
 typedef struct {
     float temp_c;            // setpoint (top-level zones[].temp)
@@ -85,6 +95,27 @@ void dial_state_commit(void (*mutate)(app_state_t *st, void *arg), void *arg);
 // Convenience: set the connection phase (+ optional error text, NULL to keep).
 void dial_state_set_phase(conn_phase_t phase, const char *err);
 
+// Hot-path setter used by the dial screen during knob/drag interaction.
+void dial_state_set_ui_temp(zone_idx_t zone, int temp_f);
+
 // --- Input quiet-period gate (torn-read-safe on 32-bit) ---
 void    dial_state_stamp_input(void);   // call on EVERY user input
 int64_t dial_state_last_input_us(void);
+
+/*
+ * UI -> worker command queue. Screens post; the (single) network worker
+ * drains, coalescing bursts (a knob spin collapses to one set_zone).
+ */
+typedef enum {
+    CMD_SET_TEMP,   // zone + temp_f
+    CMD_TOGGLE_ON,  // zone
+} cmd_kind_t;
+
+typedef struct {
+    cmd_kind_t kind;
+    zone_idx_t zone;
+    int        temp_f;
+} app_cmd_t;
+
+void dial_cmd_post(const app_cmd_t *cmd);
+bool dial_cmd_receive(app_cmd_t *out, int timeout_ms);

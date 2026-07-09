@@ -20,6 +20,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "nvs_flash.h"
@@ -39,6 +40,19 @@ static char s_ap_ssid[16];
 static esp_netif_t *s_sta_netif, *s_ap_netif;
 static httpd_handle_t s_httpd;
 static volatile bool s_got_creds;
+
+// Post-boot reconnect: once a connection has been established, a drop retries
+// forever with capped backoff (the initial-connect path keeps its bounded
+// retries so the setup portal can still take over on bad creds).
+static bool s_ever_connected;
+static int  s_backoff_s = 1;
+static esp_timer_handle_t s_retry_timer;
+static dial_net_event_cb_t s_event_cb;
+
+static void emit(dial_net_event_t ev) { if (s_event_cb) s_event_cb(ev); }
+void dial_net_on_event(dial_net_event_cb_t cb) { s_event_cb = cb; }
+
+static void retry_timer_cb(void *arg) { esp_wifi_connect(); }
 
 /* ---- credential storage ---------------------------------------------- */
 
@@ -79,10 +93,21 @@ static bool load_creds(char *ssid, size_t ssid_sz, char *pass, size_t pass_sz)
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        // sta_connect() issues the connect itself; connecting here as well
+        // caused the benign-but-noisy "sta is connecting" error at boot.
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        bool was_connected = s_connected;
         s_connected = false;
-        if (s_retries < 5) {
+        if (s_ever_connected) {
+            // Established link dropped: retry forever with capped backoff.
+            if (was_connected) {
+                ESP_LOGW(TAG, "Wi-Fi lost — reconnecting");
+                s_backoff_s = 1;
+                emit(DIAL_NET_EV_LOST);
+            }
+            esp_timer_start_once(s_retry_timer, (uint64_t)s_backoff_s * 1000000);
+            if (s_backoff_s < 30) s_backoff_s *= 2;
+        } else if (s_retries < 5) {
             s_retries++;
             esp_wifi_connect();
         } else {
@@ -95,8 +120,11 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (esp_netif_get_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK)
             ESP_LOGI(TAG, "DNS server " IPSTR, IP2STR(&dns.ip.u_addr.ip4));
         s_retries = 0;
+        s_backoff_s = 1;
         s_connected = true;
+        s_ever_connected = true;
         xEventGroupSetBits(s_events, WIFI_CONNECTED_BIT);
+        emit(DIAL_NET_EV_GOT_IP);
     }
 }
 
@@ -124,6 +152,9 @@ void dial_net_init(void)
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "OrionDial-%02X%02X", mac[4], mac[5]);
+
+    const esp_timer_create_args_t rt = { .callback = retry_timer_cb, .name = "wifi_retry" };
+    ESP_ERROR_CHECK(esp_timer_create(&rt, &s_retry_timer));
 }
 
 const char *dial_net_ap_ssid(void) { return s_ap_ssid; }
@@ -327,17 +358,24 @@ void dial_net_bringup(void)
 {
     char ssid[33], pass[65];
 
-    // 1) Try stored credentials.
+    // 1) Try stored credentials. Three rounds before falling into the portal:
+    //    a router that is still booting after a power blip shouldn't strand the
+    //    dial in setup mode.
     if (load_creds(ssid, sizeof(ssid), pass, sizeof(pass))) {
+        emit(DIAL_NET_EV_CONNECTING);
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_start());
-        if (sta_connect(ssid, pass, 20000))
-            return;
+        for (int round = 0; round < 3; round++) {
+            if (sta_connect(ssid, pass, 20000))
+                return;
+            ESP_LOGW(TAG, "stored creds attempt %d/3 failed", round + 1);
+        }
         ESP_LOGW(TAG, "stored creds failed — starting setup portal");
         esp_wifi_stop();
     }
 
     // 2) Run the captive portal until we get creds that connect.
+    emit(DIAL_NET_EV_PORTAL);
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_start());
     portal_start();

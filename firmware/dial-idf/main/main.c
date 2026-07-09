@@ -1,16 +1,30 @@
+/*
+ * Orion dial — app wiring.
+ *
+ * Structure:
+ *   dial_display  LCD/touch/LVGL bring-up + the LVGL task and lock
+ *   dial_state    snapshot store + UI->worker command queue + input stamp
+ *   dial_ui       screen router (LVGL task) + screens
+ *   worker_task   (here) the single network task: Wi-Fi -> OAuth -> MCP ->
+ *                 command/poll loop, as a supervisor state machine. Every
+ *                 failure is a phase + backoff, never a dead end.
+ *
+ * Threading: the worker never touches LVGL; it commits to dial_state and the
+ * router's dispatcher renders. Knob callbacks (esp_timer task) only feed the
+ * router's atomic accumulator. LVGL event callbacks already hold the LVGL
+ * mutex and must not re-lock it.
+ */
 #include <stdio.h>
-
-#include <math.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
-#include "freertos/event_groups.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 
-#include "lvgl.h"
 #include "dial_display.h"
+#include "dial_state.h"
+#include "ui_router.h"
+#include "ui_screens.h"
 #include "dial_wifi.h"
 #include "dial_oauth.h"
 #include "dial_mcp.h"
@@ -18,231 +32,31 @@
 #include "bidi_switch_knob.h"
 #include "secrets.h"
 #include "cJSON.h"
-static const char *TAG = "example";
 
-// Full-screen setup screen: instruction label + a QR of the authorize URL.
-static void ui_show_qr(const char *title, const char *url)
-{
-    if (!dial_display_lock(-1)) return;
-    lv_obj_t *scr = lv_scr_act();
-    lv_obj_clean(scr);
-    lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
+static const char *TAG = "app";
 
-    lv_obj_t *label = lv_label_create(scr);
-    lv_label_set_text(label, title);
-    lv_obj_set_style_text_color(label, lv_color_hex(0x0b6a4a), 0);
-    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 44);
-
-    lv_obj_t *qr = lv_qrcode_create(scr, 220, lv_color_black(), lv_color_white());
-    lv_qrcode_update(qr, url, strlen(url));
-    lv_obj_center(qr);
-    dial_display_unlock();
-}
-
-// Centered status message.
-static void ui_show_msg(const char *msg)
-{
-    if (!dial_display_lock(-1)) return;
-    lv_obj_t *scr = lv_scr_act();
-    lv_obj_clean(scr);
-    lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
-    lv_obj_t *label = lv_label_create(scr);
-    lv_obj_set_width(label, 300);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(label, msg);
-    lv_obj_set_style_text_color(label, lv_color_hex(0x0b6a4a), 0);
-    lv_obj_center(label);
-    dial_display_unlock();
-}
-
-// OAuth: get a usable access token (stored, refreshed, or via on-screen consent).
-/* ========================= Orion control ============================== *
- * The rotary encoder lives on the companion MCU, so for now this dial is
- * driven by the working touchscreen: an LVGL arc you drag to set the target
- * temperature and a button to toggle the zone on/off. Touch events post
- * commands to a worker (the oauth_task loop) that owns the MCP session; the
- * worker polls get_device_state and pushes the truth back to the UI.
- */
-
-#define ORION_ZONE  "zone_a"      // this dial controls zone_a (owner side)
-#define TEMP_MIN_F  55
-#define TEMP_MAX_F  110
-
-typedef enum { CMD_SET_TEMP, CMD_TOGGLE_ON } orion_cmd_kind_t;
-typedef struct { orion_cmd_kind_t kind; int temp_f; } orion_cmd_t;
-
-static QueueHandle_t     s_cmd_q;
-static SemaphoreHandle_t s_state_mux;
-static char  s_serial[16];
-static float s_temp_c;       // last known device temp for our zone (°C)
-static bool  s_on;
-static bool  s_online;
-static bool  s_have_state;
-
-static lv_obj_t *s_arc, *s_temp_lbl, *s_state_lbl;
-
-// Rotary encoder on GPIO8 (A) / GPIO7 (B). The encoder is only electrically
-// live under the full board init (display+touch up) — bare-GPIO probes read it
-// dead. Decoded by Waveshare's bidi_switch_knob (iot_knob), the same decoder the
-// stock firmware uses for this exact detented part. Each detent -> a left/right
-// event -> a 1°F step on the setpoint.
-#define KNOB_A 8
-#define KNOB_B 7
-static knob_handle_t s_knob;
-static volatile int  s_ui_temp_f = -1;   // current shown setpoint (°F); -1 = unknown
-
-// Device resync is gated on a quiet period: every user input stamps this, and
-// the poll only reads the bed back once there's been no input for a while (so an
-// update can never land mid-interaction). The poll interval is measured from T0
-// = the last input, not wall-clock.
-static volatile int64_t s_last_input_us;
+// Device resync is gated on a quiet period: every user input stamps the store,
+// and the poll only reads the bed back once there's been no input for a while
+// (so an update can never land mid-interaction).
 #define KNOB_SETTLE_US    2500000    // 2.5s of no input before the bed is read back
 #define POLL_INTERVAL_US 10000000    // and at most every ~10s when idle
 
-// Orion works in °C; this US user's app shows °F. The device's own conversion
-// table is the linear formula rounded to 0.1°C, so linear round-trips exactly.
-static inline int   c_to_f(float c) { return (int)lroundf(c * 1.8f + 32.0f); }
-static inline float f_to_c(int f)   { return roundf(((f - 32) / 1.8f) * 10.0f) / 10.0f; }
+#define BACKOFF_MIN_S  5
+#define BACKOFF_MAX_S 60
 
-// ---- UI (all callers below hold the LVGL mux where noted) ----
+static const char *zone_id_str(zone_idx_t z) { return z == ZONE_A ? "zone_a" : "zone_b"; }
 
-// Update the center readout. Caller must hold the LVGL mux.
-static void ui_set_center(int temp_f, bool on, bool online)
-{
-    char t[8];
-    snprintf(t, sizeof(t), "%d", temp_f);
-    lv_label_set_text(s_temp_lbl, t);
-    lv_label_set_text(s_state_lbl, !online ? "OFFLINE" : (on ? "ON" : "OFF"));
-    lv_color_t c = !online ? lv_color_hex(0x666666)
-                           : (on ? lv_color_hex(0xff7043) : lv_color_hex(0x5b8def));
-    lv_obj_set_style_text_color(s_temp_lbl, c, 0);
-    lv_obj_set_style_arc_color(s_arc, c, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_opa(s_arc, on ? LV_OPA_COVER : LV_OPA_40, LV_PART_INDICATOR);
-}
+/* ---- rotary knob ------------------------------------------------------ */
+// GPIO8 (A) / GPIO7 (B); only electrically live under the full board init.
+// Callbacks run in the decoder's esp_timer task: feed the router's atomic
+// accumulator and nothing else (blocking here stalls lv_tick_inc).
+#define KNOB_A 8
+#define KNOB_B 7
+static knob_handle_t s_knob;
 
-// LVGL event callbacks run inside lv_timer_handler, which already holds the
-// LVGL mux — so they must NOT re-lock. They only touch LVGL + post to the queue.
-static void arc_event_cb(lv_event_t *e)
-{
-    s_last_input_us = esp_timer_get_time();
-    int f = lv_arc_get_value(s_arc);
-    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
-        char t[8];
-        snprintf(t, sizeof(t), "%d", f);
-        lv_label_set_text(s_temp_lbl, t);          // live feedback while dragging
-    } else {                                        // LV_EVENT_RELEASED
-        orion_cmd_t cmd = { .kind = CMD_SET_TEMP, .temp_f = f };
-        xQueueSend(s_cmd_q, &cmd, 0);
-    }
-}
+static void knob_left_cb(void *arg, void *data)  { (void)arg; (void)data; ui_router_knob_input(-1); }
+static void knob_right_cb(void *arg, void *data) { (void)arg; (void)data; ui_router_knob_input(+1); }
 
-static void power_event_cb(lv_event_t *e)
-{
-    s_last_input_us = esp_timer_get_time();
-    orion_cmd_t cmd = { .kind = CMD_TOGGLE_ON };
-    xQueueSend(s_cmd_q, &cmd, 0);
-}
-
-static void ui_build_dial(void)
-{
-    if (!dial_display_lock(-1)) return;
-    lv_obj_t *scr = lv_scr_act();
-    lv_obj_clean(scr);
-    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
-
-    s_arc = lv_arc_create(scr);
-    lv_obj_set_size(s_arc, 320, 320);
-    lv_obj_center(s_arc);
-    lv_arc_set_rotation(s_arc, 135);
-    lv_arc_set_bg_angles(s_arc, 0, 270);
-    lv_arc_set_range(s_arc, TEMP_MIN_F, TEMP_MAX_F);
-    lv_arc_set_value(s_arc, (TEMP_MIN_F + TEMP_MAX_F) / 2);
-    lv_obj_set_style_arc_width(s_arc, 16, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(s_arc, 16, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(s_arc, lv_color_hex(0x2a2a2a), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_arc, lv_color_hex(0xffffff), LV_PART_KNOB);
-    lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_RELEASED, NULL);
-
-    lv_obj_t *zone = lv_label_create(scr);
-    lv_obj_set_style_text_font(zone, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(zone, lv_color_hex(0x888888), 0);
-    lv_label_set_text(zone, "MY SIDE");
-    lv_obj_align(zone, LV_ALIGN_CENTER, 0, -66);
-
-    s_temp_lbl = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_temp_lbl, &lv_font_montserrat_48, 0);
-    lv_obj_set_style_text_color(s_temp_lbl, lv_color_hex(0xff7043), 0);
-    lv_label_set_text(s_temp_lbl, "--");
-    lv_obj_align(s_temp_lbl, LV_ALIGN_CENTER, 0, -8);
-
-    lv_obj_t *unit = lv_label_create(scr);
-    lv_obj_set_style_text_font(unit, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(unit, lv_color_hex(0xaaaaaa), 0);
-    lv_label_set_text(unit, "\xC2\xB0" "F");        // UTF-8 degree sign + F
-    lv_obj_align_to(unit, s_temp_lbl, LV_ALIGN_OUT_RIGHT_TOP, 4, 8);
-
-    lv_obj_t *btn = lv_btn_create(scr);
-    lv_obj_set_size(btn, 104, 44);
-    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 62);
-    lv_obj_set_style_radius(btn, 22, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1e1e1e), 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(0x444444), 0);
-    lv_obj_add_event_cb(btn, power_event_cb, LV_EVENT_CLICKED, NULL);
-    s_state_lbl = lv_label_create(btn);
-    lv_obj_set_style_text_font(s_state_lbl, &lv_font_montserrat_16, 0);
-    lv_label_set_text(s_state_lbl, "--");
-    lv_obj_center(s_state_lbl);
-
-    dial_display_unlock();
-}
-
-// Push the shared device state into the UI (called from the worker task).
-static void ui_apply_state(void)
-{
-    xSemaphoreTake(s_state_mux, portMAX_DELAY);
-    int  f      = c_to_f(s_temp_c);
-    bool on     = s_on;
-    bool online = s_online;
-    bool have   = s_have_state;
-    if (have) s_ui_temp_f = f;     // keep the knob's baseline synced to the device
-    xSemaphoreGive(s_state_mux);
-    if (!have) return;
-    if (!dial_display_lock(-1)) return;
-    lv_arc_set_value(s_arc, f);
-    ui_set_center(f, on, online);
-    dial_display_unlock();
-}
-
-// ---- Rotary knob -> temperature setpoint ----
-// A knob detent adjusts the setpoint by 1°F: update UI optimistically and queue
-// a set_zone. Runs in the decoder's esp_timer task, so it only touches the
-// queue + the two mutexes (never blocks on the network).
-static void knob_apply_step(int delta_f)
-{
-    if (!s_cmd_q) return;
-    s_last_input_us = esp_timer_get_time();
-    xSemaphoreTake(s_state_mux, portMAX_DELAY);
-    int cur = (s_ui_temp_f >= 0) ? s_ui_temp_f : c_to_f(s_temp_c);
-    int nf  = cur + delta_f;
-    if (nf < TEMP_MIN_F) nf = TEMP_MIN_F;
-    if (nf > TEMP_MAX_F) nf = TEMP_MAX_F;
-    s_ui_temp_f = nf;
-    bool on = s_on;
-    xSemaphoreGive(s_state_mux);
-
-    if (dial_display_lock(50)) {
-        lv_arc_set_value(s_arc, nf);
-        ui_set_center(nf, on, true);
-        dial_display_unlock();
-    }
-    orion_cmd_t cmd = { .kind = CMD_SET_TEMP, .temp_f = nf };
-    xQueueSend(s_cmd_q, &cmd, 0);
-}
-static void knob_left_cb(void *arg, void *data)  { knob_apply_step(-1); }  // CCW = cooler
-static void knob_right_cb(void *arg, void *data) { knob_apply_step(+1); }  // CW  = warmer
 static void knob_init(void)
 {
     knob_config_t cfg = { .gpio_encoder_a = KNOB_A, .gpio_encoder_b = KNOB_B };
@@ -253,7 +67,93 @@ static void knob_init(void)
     ESP_LOGI(TAG, "knob ready on GPIO%d/%d", KNOB_A, KNOB_B);
 }
 
-// ---- Orion MCP tool calls (run on the worker task) ----
+/* ---- navigation policy (runs in the LVGL task) ------------------------ */
+
+static screen_id_t nav_policy(const app_state_t *st, void **arg)
+{
+    switch (st->phase) {
+    case PH_WIFI_PORTAL:        return SCR_WIFI_PORTAL;
+    case PH_OAUTH_WAIT_CONSENT: return SCR_OAUTH_QR;
+    case PH_READY:
+    case PH_DEGRADED:
+    case PH_WIFI_LOST:
+        // Once we have device state, stay on the dial (with its staleness dot)
+        // through transient outages rather than yanking the user to a status
+        // screen mid-interaction.
+        if (st->have_state) {
+            *arg = (void *)(uintptr_t)st->ui_zone;
+            return SCR_DIAL;
+        }
+        return st->phase == PH_READY ? SCR_CONNECTING : SCR_ERROR;
+    default:                    return SCR_CONNECTING;
+    }
+}
+
+/* ---- store mutators (file-scope: no GCC nested-fn trampolines) --------- */
+
+typedef struct {
+    zone_state_t zones[ZONE_COUNT];
+    bool online;
+    bool safety_error;
+    char safety_desc[96];
+    char water_fill[12];
+} device_snapshot_t;
+
+static void mut_device_state(app_state_t *st, void *arg)
+{
+    device_snapshot_t *d = arg;
+    for (int z = 0; z < ZONE_COUNT; z++) {
+        // Names come from list_devices, not the state poll — keep them.
+        char keep[sizeof(st->zones[z].user_name)];
+        memcpy(keep, st->zones[z].user_name, sizeof(keep));
+        st->zones[z] = d->zones[z];
+        memcpy(st->zones[z].user_name, keep, sizeof(keep));
+        st->ui_temp_f[z] = -1;              // device truth is the new baseline
+    }
+    st->device_online = d->online;
+    st->safety.error = d->safety_error;
+    strlcpy(st->safety.desc, d->safety_desc, sizeof(st->safety.desc));
+    strlcpy(st->water_fill, d->water_fill, sizeof(st->water_fill));
+    st->have_state = true;
+}
+
+typedef struct { char names[ZONE_COUNT][24]; char serial[16]; } device_identity_t;
+
+static void mut_identity(app_state_t *st, void *arg)
+{
+    device_identity_t *n = arg;
+    for (int z = 0; z < ZONE_COUNT; z++)
+        strlcpy(st->zones[z].user_name, n->names[z], sizeof(st->zones[z].user_name));
+    strlcpy(st->serial, n->serial, sizeof(st->serial));
+}
+
+typedef struct { int zone; bool on; } zone_on_t;
+static void mut_zone_on(app_state_t *st, void *arg)
+{
+    zone_on_t *u = arg;
+    st->zones[u->zone].on = u->on;                  // optimistic
+}
+
+typedef struct { int zone; float temp_c; } zone_temp_t;
+static void mut_zone_temp(app_state_t *st, void *arg)
+{
+    zone_temp_t *u = arg;
+    st->zones[u->zone].temp_c = u->temp_c;          // optimistic
+    st->ui_temp_f[u->zone] = -1;
+}
+
+static void mut_oauth_url(app_state_t *st, void *arg) { strlcpy(st->oauth_url, arg, sizeof(st->oauth_url)); }
+static void mut_retry_in(app_state_t *st, void *arg)  { st->retry_in_s = *(int *)arg; }
+static void mut_ap_ssid(app_state_t *st, void *arg)   { strlcpy(st->ap_ssid, arg, sizeof(st->ap_ssid)); }
+
+/* ---- Orion MCP calls (worker task only) -------------------------------- */
+
+static char s_serial[16];
+
+static zone_idx_t zone_idx_from_id(const char *id)
+{
+    return (id && strcmp(id, "zone_b") == 0) ? ZONE_B : ZONE_A;
+}
 
 static bool orion_refresh_state(void)
 {
@@ -265,206 +165,299 @@ static bool orion_refresh_state(void)
     free(json);
     if (!root) return false;
 
-    bool online = false, on = false, found = false;
-    float temp = 0;
-    cJSON *status = cJSON_GetObjectItem(root, "status");
-    if (status) online = cJSON_IsTrue(cJSON_GetObjectItem(status, "online"));
+    device_snapshot_t d = { 0 };
+    for (int z = 0; z < ZONE_COUNT; z++) d.zones[z].actual_c = -1.0f;
+    strlcpy(d.water_fill, "unknown", sizeof(d.water_fill));
+
     cJSON *z;
     cJSON_ArrayForEach(z, cJSON_GetObjectItem(root, "zones")) {
         cJSON *id = cJSON_GetObjectItem(z, "id");
-        if (id && id->valuestring && strcmp(id->valuestring, ORION_ZONE) == 0) {
+        if (!id || !id->valuestring) continue;
+        zone_state_t *zs = &d.zones[zone_idx_from_id(id->valuestring)];
+        cJSON *t = cJSON_GetObjectItem(z, "temp");
+        if (cJSON_IsNumber(t)) zs->temp_c = (float)t->valuedouble;
+        zs->on = cJSON_IsTrue(cJSON_GetObjectItem(z, "on"));
+    }
+
+    cJSON *status = cJSON_GetObjectItem(root, "status");
+    if (status) {
+        d.online = cJSON_IsTrue(cJSON_GetObjectItem(status, "online"));
+        cJSON_ArrayForEach(z, cJSON_GetObjectItem(status, "zones")) {
+            cJSON *id = cJSON_GetObjectItem(z, "id");
+            if (!id || !id->valuestring) continue;
+            zone_state_t *zs = &d.zones[zone_idx_from_id(id->valuestring)];
             cJSON *t = cJSON_GetObjectItem(z, "temp");
-            if (cJSON_IsNumber(t)) temp = (float)t->valuedouble;
-            on = cJSON_IsTrue(cJSON_GetObjectItem(z, "on"));
-            found = true;
+            if (cJSON_IsNumber(t)) zs->actual_c = (float)t->valuedouble;
+            cJSON *ts = cJSON_GetObjectItem(z, "thermal_state");
+            if (ts && ts->valuestring)
+                strlcpy(zs->thermal_state, ts->valuestring, sizeof(zs->thermal_state));
+        }
+        cJSON *safety = cJSON_GetObjectItem(status, "safety");
+        if (safety) {
+            d.safety_error = cJSON_IsTrue(cJSON_GetObjectItem(safety, "error"));
+            cJSON *descs = cJSON_GetObjectItem(safety, "error_descriptions");
+            cJSON *first = cJSON_IsArray(descs) ? cJSON_GetArrayItem(descs, 0) : NULL;
+            if (first && first->valuestring)
+                strlcpy(d.safety_desc, first->valuestring, sizeof(d.safety_desc));
         }
     }
+    cJSON *wf = cJSON_GetObjectItem(root, "water_fill");
+    if (wf && wf->valuestring) strlcpy(d.water_fill, wf->valuestring, sizeof(d.water_fill));
     cJSON_Delete(root);
-    if (!found) return false;
 
-    xSemaphoreTake(s_state_mux, portMAX_DELAY);
-    s_temp_c = temp; s_on = on; s_online = online; s_have_state = true;
-    xSemaphoreGive(s_state_mux);
+    dial_state_commit(mut_device_state, &d);
     return true;
 }
 
-static bool orion_set_zone(const char *field_json)
+static bool orion_set_zone(zone_idx_t zone, const char *field_json)
 {
     char args[96];
     snprintf(args, sizeof(args), "{\"serial\":\"%s\",\"zone_id\":\"%s\",%s}",
-             s_serial, ORION_ZONE, field_json);
+             s_serial, zone_id_str(zone), field_json);
     char *r = NULL;
     bool ok = dial_mcp_call_tool("set_zone", args, &r);
-    ESP_LOGI(TAG, "set_zone %s -> %s (%s)", field_json, ok ? "ok" : "fail",
-             ok ? "" : dial_mcp_last_error());
+    if (!ok) ESP_LOGW(TAG, "set_zone %s failed: %s", field_json, dial_mcp_last_error());
     free(r);
     return ok;
 }
 
-static void oauth_task(void *arg)
+static bool orion_discover_device(void)
 {
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    char ip[16];
-    if (!dial_net_ip(ip, sizeof(ip))) { vTaskDelete(NULL); return; }
-    char redirect_uri[48];
-    snprintf(redirect_uri, sizeof(redirect_uri), "http://%s/callback", ip);
-
-    oauth_disc_t disc;
-    char client_id[96];
-    if (!dial_oauth_discover(&disc) ||
-        !dial_oauth_ensure_client(&disc, redirect_uri, client_id, sizeof(client_id))) {
-        ui_show_msg("Setup error:\nOrion unreachable");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    if (dial_oauth_have_valid_access()) {
-        ESP_LOGI(TAG, "using stored access token");
-    } else if (dial_oauth_refresh(&disc, client_id)) {
-        ESP_LOGI(TAG, "refreshed access token");
-    } else {
-        char url[600];
-        if (dial_oauth_start_authorize(&disc, client_id, redirect_uri, url, sizeof(url))) {
-            ESP_LOGI(TAG, "authorize URL: %s", url);
-            ui_show_qr("Scan to link your dial", url);
-            bool ok = dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 300000);
-            dial_oauth_stop_authorize();
-            if (ok) {
-                ui_show_msg("Dial linked!");
-            } else {
-                char msg[256];
-                snprintf(msg, sizeof(msg), "Link failed:\n%s", dial_oauth_last_error());
-                ui_show_msg(msg);
-                vTaskDelete(NULL);
-                return;
-            }
-        }
-    }
-
-    ui_show_msg("Connecting to Orion...");
-
-    // ---- Open the MCP session ----
-    char *server = NULL;
-    if (!dial_mcp_connect(&server)) {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "Orion connect failed:\n%s", dial_mcp_last_error());
-        ui_show_msg(msg);
-        vTaskDelete(NULL);
-        return;
-    }
-    ESP_LOGI(TAG, "MCP server: %s, %d tools", server ? server : "?",
-             dial_mcp_list_tools_count());
-    free(server);
-
-    // ---- Find this bed's serial from list_devices ----
     char *devices = NULL;
-    if (dial_mcp_call_tool("list_devices", "{}", &devices) && devices) {
-        cJSON *root = cJSON_Parse(devices);
-        cJSON *arr  = root ? cJSON_GetObjectItem(root, "devices") : NULL;
-        cJSON *dev0 = cJSON_IsArray(arr) ? cJSON_GetArrayItem(arr, 0) : NULL;
-        cJSON *serial = dev0 ? cJSON_GetObjectItem(dev0, "serial_number") : NULL;
-        if (serial && serial->valuestring)
+    if (!dial_mcp_call_tool("list_devices", "{}", &devices) || !devices) return false;
+
+    cJSON *root = cJSON_Parse(devices);
+    free(devices);
+    if (!root) return false;
+
+    bool ok = false;
+    cJSON *arr  = cJSON_GetObjectItem(root, "devices");
+    cJSON *dev0 = cJSON_IsArray(arr) ? cJSON_GetArrayItem(arr, 0) : NULL;
+    if (dev0) {
+        cJSON *serial = cJSON_GetObjectItem(dev0, "serial_number");
+        if (serial && serial->valuestring) {
             strlcpy(s_serial, serial->valuestring, sizeof(s_serial));
-        cJSON *tz = dev0 ? cJSON_GetObjectItem(dev0, "timezone") : NULL;
+            ok = true;
+        }
+        cJSON *tz = cJSON_GetObjectItem(dev0, "timezone");
         if (tz && tz->valuestring)
             dial_time_set_iana_tz(tz->valuestring);
-        if (root) cJSON_Delete(root);
-    }
-    free(devices);
-    if (!s_serial[0]) {
-        ui_show_msg("No Orion device\non this account");
-        vTaskDelete(NULL);
-        return;
-    }
-    ESP_LOGI(TAG, "controlling serial %s zone %s", s_serial, ORION_ZONE);
 
-    // ---- Build the touch dial, start the knob, enter the command + poll loop ----
-    s_cmd_q     = xQueueCreate(16, sizeof(orion_cmd_t));
-    s_state_mux = xSemaphoreCreateMutex();
-    orion_refresh_state();
-    ui_build_dial();
-    ui_apply_state();
-    knob_init();     // safe now: queue + mutex + UI all exist
+        device_identity_t ident = { 0 };
+        strlcpy(ident.serial, s_serial, sizeof(ident.serial));
+        cJSON *zn;
+        cJSON_ArrayForEach(zn, cJSON_GetObjectItem(dev0, "zones")) {
+            cJSON *id = cJSON_GetObjectItem(zn, "id");
+            cJSON *user = cJSON_GetObjectItem(zn, "user");
+            cJSON *fn = user ? cJSON_GetObjectItem(user, "first_name") : NULL;
+            if (id && id->valuestring && fn && fn->valuestring)
+                strlcpy(ident.names[zone_idx_from_id(id->valuestring)],
+                        fn->valuestring, sizeof(ident.names[0]));
+        }
+        if (ok) dial_state_commit(mut_identity, &ident);
+    }
+    cJSON_Delete(root);
+    return ok;
+}
 
-    int64_t last_poll_us = esp_timer_get_time();
+/* ---- worker supervisor ------------------------------------------------- */
+
+// Sleep `seconds` while publishing a countdown for the error screen.
+static void backoff_wait(int seconds)
+{
+    for (int s = seconds; s > 0; s--) {
+        dial_state_commit(mut_retry_in, &s);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    int zero = 0;
+    dial_state_commit(mut_retry_in, &zero);
+}
+
+// 401-aware call wrapper: on failure, refresh the token, reopen the MCP
+// session, retry once. Used for polls AND writes so an expired token never
+// silently drops a command.
+static bool with_auth_retry(bool (*call)(void), const oauth_disc_t *disc, const char *client_id)
+{
+    if (call()) return true;
+    if (dial_oauth_refresh(disc, client_id)) {
+        dial_mcp_connect(NULL);
+        return call();
+    }
+    return false;
+}
+
+static bool poll_call(void) { return orion_refresh_state(); }
+
+static void worker_task(void *arg)
+{
+    (void)arg;
+    oauth_disc_t disc;
+    char client_id[96];
+    int backoff_s = BACKOFF_MIN_S;
+
+    // ---- Wi-Fi (blocking bringup; portal phase published via events) ----
+    dial_state_set_phase(PH_WIFI_CONNECTING, NULL);
+    dial_net_bringup();
+    dial_time_start();
+
+    // ---- OAuth + MCP with retry/backoff on every step ----
     for (;;) {
-        orion_cmd_t cmd;
-        // Short tick so the loop stays responsive to commands; the device
-        // readback is gated separately on the quiet-period below.
-        if (xQueueReceive(s_cmd_q, &cmd, pdMS_TO_TICKS(300)) == pdTRUE) {
-            // Coalesce a burst (e.g. spinning the knob): collapse to at most one
-            // net on/off toggle + the final target temperature.
-            int  last_temp = -1, toggles = 0;
-            do {
-                if (cmd.kind == CMD_SET_TEMP) last_temp = cmd.temp_f;
-                else toggles++;
-            } while (xQueueReceive(s_cmd_q, &cmd, 0) == pdTRUE);
+        dial_state_set_phase(PH_OAUTH_DISCOVER, NULL);
 
-            if (toggles & 1) {
-                xSemaphoreTake(s_state_mux, portMAX_DELAY);
-                bool cur = s_on;
-                xSemaphoreGive(s_state_mux);
-                if (orion_set_zone(cur ? "\"on\":false" : "\"on\":true")) {
-                    xSemaphoreTake(s_state_mux, portMAX_DELAY);
-                    s_on = !cur;                 // optimistic: trust the change
-                    xSemaphoreGive(s_state_mux);
+        char ip[16], redirect_uri[48];
+        if (!dial_net_ip(ip, sizeof(ip))) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        snprintf(redirect_uri, sizeof(redirect_uri), "http://%s/callback", ip);
+
+        if (!dial_oauth_discover(&disc) ||
+            !dial_oauth_ensure_client(&disc, redirect_uri, client_id, sizeof(client_id))) {
+            dial_state_set_phase(PH_DEGRADED, "Orion unreachable");
+            backoff_wait(backoff_s);
+            if (backoff_s < BACKOFF_MAX_S) backoff_s *= 2;
+            continue;
+        }
+
+        if (!dial_oauth_have_valid_access() && !dial_oauth_refresh(&disc, client_id)) {
+            // Interactive consent: QR on screen; on timeout, a fresh QR — no dead end.
+            char url[600];
+            if (!dial_oauth_start_authorize(&disc, client_id, redirect_uri, url, sizeof(url))) {
+                dial_state_set_phase(PH_DEGRADED, dial_oauth_last_error());
+                backoff_wait(backoff_s);
+                continue;
+            }
+            dial_state_commit(mut_oauth_url, url);
+            dial_state_set_phase(PH_OAUTH_WAIT_CONSENT, NULL);
+            bool ok = dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 300000);
+            dial_oauth_stop_authorize();
+            if (!ok) {
+                ESP_LOGW(TAG, "consent window elapsed (%s) — restarting authorize",
+                         dial_oauth_last_error());
+                continue;
+            }
+        }
+
+        dial_state_set_phase(PH_MCP_CONNECTING, NULL);
+        if (!dial_mcp_connect(NULL) || !orion_discover_device()) {
+            dial_state_set_phase(PH_DEGRADED, dial_mcp_last_error());
+            backoff_wait(backoff_s);
+            if (backoff_s < BACKOFF_MAX_S) backoff_s *= 2;
+            continue;
+        }
+        backoff_s = BACKOFF_MIN_S;
+        break;
+    }
+    ESP_LOGI(TAG, "device linked; %d tools", dial_mcp_list_tools_count());
+
+    with_auth_retry(poll_call, &disc, client_id);
+    dial_state_set_phase(PH_READY, NULL);
+    knob_init();   // safe now: full board init done, router running
+
+    // ---- steady state: drain commands (coalescing per zone), gated poll ----
+    int64_t last_poll_us = esp_timer_get_time();
+    int poll_failures = 0;
+    for (;;) {
+        app_cmd_t cmd;
+        if (dial_cmd_receive(&cmd, 300)) {
+            // Coalesce a burst: per zone, at most one net toggle + final temp.
+            int last_temp[ZONE_COUNT] = { -1, -1 };
+            int toggles[ZONE_COUNT]   = { 0, 0 };
+            do {
+                if (cmd.kind == CMD_SET_TEMP) last_temp[cmd.zone] = cmd.temp_f;
+                else                          toggles[cmd.zone]++;
+            } while (dial_cmd_receive(&cmd, 0));
+
+            for (int z = 0; z < ZONE_COUNT; z++) {
+                if (toggles[z] & 1) {
+                    app_state_t st;
+                    dial_state_get(&st);
+                    zone_on_t up = { z, !st.zones[z].on };
+                    char f[24];
+                    snprintf(f, sizeof(f), "\"on\":%s", up.on ? "true" : "false");
+                    if (orion_set_zone((zone_idx_t)z, f))
+                        dial_state_commit(mut_zone_on, &up);
+                }
+                if (last_temp[z] >= 0) {
+                    zone_temp_t up = { z, dial_f_to_c(last_temp[z]) };
+                    char f[24];
+                    snprintf(f, sizeof(f), "\"temp\":%.1f", up.temp_c);
+                    if (orion_set_zone((zone_idx_t)z, f))
+                        dial_state_commit(mut_zone_temp, &up);
                 }
             }
-            if (last_temp >= 0) {
-                char f[24];
-                snprintf(f, sizeof(f), "\"temp\":%.1f", f_to_c(last_temp));
-                if (orion_set_zone(f)) {
-                    xSemaphoreTake(s_state_mux, portMAX_DELAY);
-                    s_temp_c = f_to_c(last_temp);  // optimistic: trust the change
-                    xSemaphoreGive(s_state_mux);
-                }
-            }
-            // Reflect the (optimistic) local state. Deliberately NO device
-            // readback here: the bed lags a beat. Also push the poll's T0 out so
-            // the resync waits for the quiet period after this input.
-            ui_apply_state();
+            // Push the poll's T0 out so the resync waits for quiet after this.
             last_poll_us = esp_timer_get_time();
             continue;
         }
 
-        // No command this tick. Resync to the device truth only when it's been
-        // quiet (no input for KNOB_SETTLE_US) AND a poll interval has elapsed —
-        // so an update can never land mid-interaction.
+        // No command this tick. Resync only when quiet AND due.
         int64_t now = esp_timer_get_time();
-        if (now - s_last_input_us < KNOB_SETTLE_US) continue;
+        if (now - dial_state_last_input_us() < KNOB_SETTLE_US) continue;
         if (now - last_poll_us < POLL_INTERVAL_US) continue;
 
-        if (!dial_oauth_have_valid_access())
-            dial_oauth_refresh(&disc, client_id);
-        if (!orion_refresh_state() && dial_oauth_refresh(&disc, client_id)) {
-            dial_mcp_connect(NULL);       // token rotated — reopen the session
-            orion_refresh_state();
+        if (!dial_wifi_is_connected()) {
+            // dial_net auto-reconnects; reflect the outage and wait it out.
+            dial_state_set_phase(PH_WIFI_LOST, NULL);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            last_poll_us = esp_timer_get_time();
+            continue;
         }
-        ui_apply_state();
+
+        if (with_auth_retry(poll_call, &disc, client_id)) {
+            poll_failures = 0;
+            dial_state_set_phase(PH_READY, NULL);
+        } else if (++poll_failures >= 3) {
+            dial_state_set_phase(PH_DEGRADED, dial_mcp_last_error());
+        }
         last_poll_us = esp_timer_get_time();
+    }
+}
+
+/* ---- app entry --------------------------------------------------------- */
+
+static void net_event_cb(dial_net_event_t ev)
+{
+    // Runs on the Wi-Fi event task: only phase bookkeeping, nothing blocking.
+    app_state_t st;
+    switch (ev) {
+    case DIAL_NET_EV_PORTAL:
+        dial_state_set_phase(PH_WIFI_PORTAL, NULL);
+        break;
+    case DIAL_NET_EV_LOST:
+        dial_state_get(&st);
+        if (st.phase == PH_READY || st.phase == PH_DEGRADED)
+            dial_state_set_phase(PH_WIFI_LOST, NULL);
+        break;
+    case DIAL_NET_EV_GOT_IP:
+        dial_state_get(&st);
+        if (st.phase == PH_WIFI_LOST)
+            dial_state_set_phase(st.have_state ? PH_READY : PH_WIFI_CONNECTING, NULL);
+        break;
+    default:
+        break;
     }
 }
 
 void app_main(void)
 {
     dial_display_start();
+    dial_state_init();
 
-    ui_show_msg("Connecting to Wi-Fi...");
+    // Router + screens live in the LVGL task from here on. ui_router_start
+    // needs the LVGL lock because the LVGL task is already running.
+    ui_screens_register_all();
+    ui_router_set_nav_policy(nav_policy);
+    if (dial_display_lock(-1)) {
+        ui_router_start(SCR_CONNECTING, NULL);
+        dial_display_unlock();
+    }
 
-    // Bring up Wi-Fi: connect with stored creds, else run the SoftAP captive
-    // portal. Seed from secrets.h in dev so we can skip the portal while iterating.
+    dial_net_on_event(net_event_cb);
     dial_net_init();
     dial_net_seed(WIFI_SSID, WIFI_PASSWORD);
-    if (!dial_net_have_creds())
-        ESP_LOGW(TAG, "no Wi-Fi creds — join AP \"%s\" to set up", dial_net_ap_ssid());
-    ui_show_msg("Connecting to Wi-Fi...");
-    dial_net_bringup();
-    ESP_LOGI(TAG, "Wi-Fi ready");
-    dial_time_start();
-    ui_show_msg("Linking to Orion...");
+    dial_state_commit(mut_ap_ssid, (void *)dial_net_ap_ssid());
 
-    // OAuth runs in its own task with a generous stack: the TLS handshake plus
-    // the token exchange (large JSON) overflow smaller stacks. The rotary knob
-    // is started from inside that task once the UI + command queue exist.
-    xTaskCreate(oauth_task, "oauth", 16384, NULL, 4, NULL);
+    // OAuth/TLS/MCP need a big stack; everything network runs on this task.
+    xTaskCreate(worker_task, "worker", 16384, NULL, 4, NULL);
 }
