@@ -634,7 +634,14 @@ static bool orion_refresh_schedules(void)
 {
     struct tm lt;
     if (!dial_time_now(&lt)) return false;
+    // "Tonight" belongs to the evening it started: before noon we're still in
+    // (or just out of) the sleep session that began YESTERDAY evening, so key
+    // by the previous weekday then. Otherwise, at 00:15 the half-hourly
+    // refresh would clobber the governing schedule with the next day's entry
+    // — e.g. an early-wake Tuesday would end night mode at 05:30 during
+    // Monday night's 07:00 session. Noon is the natural session boundary.
     int today = lt.tm_wday;
+    if (lt.tm_hour < 12) today = (today + 6) % 7;
 
     char *json = NULL;
     if (!dial_mcp_call_tool("get_sleep_schedules", "{}", &json) || !json) return false;
@@ -938,6 +945,14 @@ static void worker_task(void *arg)
     if (first_poll_ok) ota_confirm_once();
     knob_init();          // safe now: full board init done, router running
     dial_haptics_init();  // I2C bus is quiet by now; cal runs once, then NVS
+    {
+        // Apply the persisted haptics preference (restored into the store at
+        // boot) — the driver defaults to enabled and settings only writes on
+        // taps, so without this an "Off" preference reverts every reboot.
+        app_state_t st;
+        dial_state_get(&st);
+        dial_haptics_set_enabled(st.haptics_enabled);
+    }
 
     // ---- steady state: drain commands (coalescing per zone), gated poll ----
     int64_t last_poll_us      = esp_timer_get_time();

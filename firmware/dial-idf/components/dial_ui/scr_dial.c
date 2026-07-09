@@ -375,6 +375,11 @@ static void screen_long_press_cb(lv_event_t *e)
 {
     (void)e;
     dial_haptics_play(HAPTIC_TICK);
+    // The finger is still down and the quick sheet is about to slide up under
+    // it; without this, LVGL re-hit-tests the held touch onto whichever row
+    // lands beneath it and fires a phantom CLICKED on release (bed off, away,
+    // ...). wait_release makes LVGL ignore this touch until the finger lifts.
+    lv_indev_wait_release(lv_indev_get_act());
     ui_router_go(SCR_QUICK, (void *)(uintptr_t)s_zone, LV_SCR_LOAD_ANIM_NONE);
 }
 
