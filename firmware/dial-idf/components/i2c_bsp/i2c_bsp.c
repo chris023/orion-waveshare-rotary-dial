@@ -36,6 +36,11 @@ void i2c_master_Init(void)
 
   dev_cfg.device_address = EXAMPLE_TOUCH_ADDR;
   ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_port0_handle, &dev_cfg, &disp_touch_dev_handle));
+
+  // DRV2605 haptic driver shares the bus (declared in the header since the
+  // Waveshare BSP, but never actually added until now).
+  dev_cfg.device_address = 0x5A;
+  ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_port0_handle, &dev_cfg, &drv2605_dev_handle));
 }
 
 uint8_t i2c_write_buff(i2c_master_dev_handle_t dev_handle,int reg,uint8_t *buf,uint8_t len)

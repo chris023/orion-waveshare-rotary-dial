@@ -29,6 +29,7 @@
 #include "dial_oauth.h"
 #include "dial_mcp.h"
 #include "dial_time.h"
+#include "dial_haptics.h"
 #include "bidi_switch_knob.h"
 #include "secrets.h"
 #include "cJSON.h"
@@ -54,8 +55,10 @@ static const char *zone_id_str(zone_idx_t z) { return z == ZONE_A ? "zone_a" : "
 #define KNOB_B 7
 static knob_handle_t s_knob;
 
-static void knob_left_cb(void *arg, void *data)  { (void)arg; (void)data; ui_router_knob_input(-1); }
-static void knob_right_cb(void *arg, void *data) { (void)arg; (void)data; ui_router_knob_input(+1); }
+// Haptic tick fires here (non-blocking queue write) so the pulse lands with
+// the detent, not a dispatcher period later.
+static void knob_left_cb(void *arg, void *data)  { (void)arg; (void)data; dial_haptics_play(HAPTIC_TICK); ui_router_knob_input(-1); }
+static void knob_right_cb(void *arg, void *data) { (void)arg; (void)data; dial_haptics_play(HAPTIC_TICK); ui_router_knob_input(+1); }
 
 static void knob_init(void)
 {
@@ -352,7 +355,8 @@ static void worker_task(void *arg)
 
     with_auth_retry(poll_call, &disc, client_id);
     dial_state_set_phase(PH_READY, NULL);
-    knob_init();   // safe now: full board init done, router running
+    knob_init();          // safe now: full board init done, router running
+    dial_haptics_init();  // I2C bus is quiet by now; cal runs once, then NVS
 
     // ---- steady state: drain commands (coalescing per zone), gated poll ----
     int64_t last_poll_us = esp_timer_get_time();

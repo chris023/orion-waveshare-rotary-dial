@@ -5,6 +5,7 @@
  * worker queue and renders optimistically; the poll reconciles later.
  */
 #include "ui_screens_internal.h"
+#include "dial_haptics.h"
 
 static lv_obj_t *s_arc, *s_temp_lbl, *s_state_lbl, *s_zone_lbl, *s_stale_dot;
 static zone_idx_t s_zone = ZONE_A;
@@ -50,6 +51,7 @@ static void arc_event_cb(lv_event_t *e)
 static void power_event_cb(lv_event_t *e)
 {
     (void)e;
+    dial_haptics_play(HAPTIC_CONFIRM);
     app_cmd_t cmd = { .kind = CMD_TOGGLE_ON, .zone = s_zone };
     dial_cmd_post(&cmd);
 }
@@ -150,7 +152,10 @@ static bool on_knob(int detents)
     int nf = s_shown_f + detents;
     if (nf < DIAL_TEMP_MIN_F) nf = DIAL_TEMP_MIN_F;
     if (nf > DIAL_TEMP_MAX_F) nf = DIAL_TEMP_MAX_F;
-    if (nf == s_shown_f) return true;               // at the stop; consumed anyway
+    if (nf == s_shown_f) {                          // at the range stop
+        dial_haptics_play(HAPTIC_STOP);
+        return true;
+    }
 
     lv_arc_set_value(s_arc, nf);
     char t[8];
