@@ -11,6 +11,7 @@
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
 #include <math.h>
+#include <time.h>
 
 LV_FONT_DECLARE(dial_font_num_88)
 
@@ -30,6 +31,7 @@ static lv_obj_t *s_unit_lbl;
 static lv_obj_t *s_pill, *s_pill_glyph, *s_pill_word;
 static lv_obj_t *s_power_btn, *s_power_glyph;
 static lv_obj_t *s_dot_a, *s_dot_b;
+static lv_obj_t *s_away_lbl;
 static lv_point_t s_dash_pts[2];
 
 static zone_idx_t s_zone = ZONE_A;
@@ -44,6 +46,11 @@ static bool s_chevron_night;
 
 // Only fade the staleness dot on an actual transition, not every on_state.
 static bool s_stale_shown;
+
+// Boost ("thermal relief") countdown: a 1s ticker that only exists while the
+// shown zone's relief is active — created lazily on the transition into
+// relief, deleted on the transition out (and on destroy()).
+static lv_timer_t *s_boost_timer;
 
 /* ---- motion helpers (design-spec.md §6) -------------------------------- */
 
@@ -153,14 +160,23 @@ static void apply_palette_and_state(const app_state_t *st)
     zone_kind_t kind = dial_zone_kind(z, st->device_online);
     lv_color_t accent = dial_zone_accent(kind, pal);
 
+    // Thermal relief ("boost") in progress: the arc + pill switch to the
+    // relief's own heat/cool accent and go full-strength, regardless of what
+    // kind/opacity the ordinary state grammar would otherwise pick — the
+    // power disc below stays kind-based (boost doesn't change on/off meaning).
+    bool relief = z->relief_active;
+    lv_color_t relief_accent = z->relief_heat ? pal->accent_heat : pal->accent_cool;
+    lv_color_t arc_accent = relief ? relief_accent : accent;
+
     lv_obj_t *scr = lv_obj_get_parent(s_arc);   // s_arc's parent is the screen
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
     // Arc track + indicator (design-spec.md §4 #2-3).
     lv_obj_set_style_arc_color(s_arc, pal->track, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(s_arc, LV_OPA_70, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(s_arc, accent, LV_PART_INDICATOR);
-    lv_opa_t indic_opa = (kind == ZK_OFFLINE) ? LV_OPA_TRANSP
+    lv_obj_set_style_arc_color(s_arc, arc_accent, LV_PART_INDICATOR);
+    lv_opa_t indic_opa = relief ? LV_OPA_COVER
+                        : (kind == ZK_OFFLINE) ? LV_OPA_TRANSP
                         : (kind == ZK_STANDBY) ? LV_OPA_30 : LV_OPA_COVER;
     lv_obj_set_style_arc_opa(s_arc, indic_opa, LV_PART_INDICATOR);
 
@@ -188,22 +204,47 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_text_opa(s_temp_lbl, (kind == ZK_OFFLINE) ? 115 : LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(s_unit_lbl, pal->ink_secondary, 0);
 
-    // State pill: surface fill, state-accent border/text/glyph.
+    // State pill: surface fill, state-accent border/text/glyph. While relief
+    // is active it takes over the pill entirely (glyph + countdown word),
+    // pre-empting the normal glyph/word grammar below.
     lv_obj_set_style_bg_color(s_pill, pal->surface, 0);
-    lv_obj_set_style_border_color(s_pill, accent, 0);
-    lv_obj_set_style_text_color(s_pill_glyph, accent, 0);
-    lv_obj_set_style_text_color(s_pill_word, accent, 0);
-    const char *glyph, *word;
-    switch (kind) {
-    case ZK_OFFLINE: glyph = LV_SYMBOL_CLOSE; word = "OFFLINE"; break;
-    case ZK_STANDBY: glyph = LV_SYMBOL_STOP;  word = "STANDBY"; break;
-    case ZK_HEATING: glyph = LV_SYMBOL_UP;    word = "HEATING"; break;
-    case ZK_COOLING: glyph = LV_SYMBOL_DOWN;  word = "COOLING"; break;
-    default:         glyph = LV_SYMBOL_MINUS; word = "HOLDING"; break;
+    lv_obj_set_style_border_color(s_pill, relief ? relief_accent : accent, 0);
+    lv_obj_set_style_text_color(s_pill_glyph, relief ? relief_accent : accent, 0);
+    lv_obj_set_style_text_color(s_pill_word, relief ? relief_accent : accent, 0);
+    const char *glyph;
+    char word[24];
+    if (relief) {
+        glyph = LV_SYMBOL_CHARGE;
+        if (st->clock_valid) {
+            int64_t now_ms = (int64_t)time(NULL) * 1000;
+            int64_t remain_ms = z->relief_end_ms - now_ms;
+            if (remain_ms < 0) remain_ms = 0;
+            int total_s = (int)(remain_ms / 1000);
+            snprintf(word, sizeof(word), "BOOST %d:%02d", total_s / 60, total_s % 60);
+        } else {
+            snprintf(word, sizeof(word), "BOOST");
+        }
+    } else {
+        const char *w;
+        switch (kind) {
+        case ZK_OFFLINE: glyph = LV_SYMBOL_CLOSE; w = "OFFLINE"; break;
+        case ZK_STANDBY: glyph = LV_SYMBOL_STOP;  w = "STANDBY"; break;
+        case ZK_HEATING: glyph = LV_SYMBOL_UP;    w = "HEATING"; break;
+        case ZK_COOLING: glyph = LV_SYMBOL_DOWN;  w = "COOLING"; break;
+        default:         glyph = LV_SYMBOL_MINUS; w = "HOLDING"; break;
+        }
+        strlcpy(word, w, sizeof(word));
     }
     lv_label_set_text(s_pill_glyph, glyph);
     lv_label_set_text(s_pill_word, word);
 
+    // The pill is only a tap target while relief is active (tap-to-cancel).
+    if (relief) lv_obj_add_flag(s_pill, LV_OBJ_FLAG_CLICKABLE);
+    else        lv_obj_clear_flag(s_pill, LV_OBJ_FLAG_CLICKABLE);
+
+    // Chevron pulse tracks the underlying thermal kind, not relief — a boost
+    // still pulses (on the charge glyph) while the zone is actively driving
+    // toward the relief extreme, and goes static once it's holding there.
     bool pulsing = (kind == ZK_HEATING || kind == ZK_COOLING);
     if (pulsing && (!s_chevron_active || night != s_chevron_night)) chevron_start(night);
     else if (!pulsing && s_chevron_active) chevron_stop();
@@ -227,6 +268,11 @@ static void apply_palette_and_state(const app_state_t *st)
     // Page dots — filled = the side this screen instance is showing.
     lv_obj_set_style_bg_color(s_dot_a, s_zone == ZONE_A ? pal->ink_secondary : pal->track, 0);
     lv_obj_set_style_bg_color(s_dot_b, s_zone == ZONE_B ? pal->ink_secondary : pal->track, 0);
+
+    // Away badge (design-spec.md §7 extension) — session-optimistic, tiny.
+    lv_obj_set_style_text_color(s_away_lbl, pal->ink_secondary, 0);
+    if (st->away) lv_obj_clear_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
+    else          lv_obj_add_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void render_numeral(int temp_f)
@@ -270,6 +316,26 @@ static void power_event_cb(lv_event_t *e)
     dial_cmd_post(&cmd);
 }
 
+// Tap the state pill while relief is active (only then is it clickable —
+// see apply_palette_and_state) to cancel the boost early.
+static void pill_event_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_CONFIRM);
+    app_cmd_t cmd = { .kind = CMD_BOOST_CANCEL };
+    dial_cmd_post(&cmd);
+}
+
+// Long-press anywhere the screen itself receives the press (numeral, labels,
+// background — the arc and power disc are clickable and keep their own press
+// handling, design-spec.md §4's occlusion note) opens quick-actions.
+static void screen_long_press_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_QUICK, (void *)(uintptr_t)s_zone, LV_SCR_LOAD_ANIM_NONE);
+}
+
 static void create(lv_obj_t *scr, void *arg)
 {
     s_zone = (zone_idx_t)(uintptr_t)arg;
@@ -278,6 +344,7 @@ static void create(lv_obj_t *scr, void *arg)
     s_stale_shown = false;
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
+    lv_obj_add_event_cb(scr, screen_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
 
     // #2-3 Chassis ring / arc (r=165, w=16, 90deg gap at 6 o'clock).
     s_arc = lv_arc_create(scr);
@@ -370,6 +437,9 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_flex_align(s_pill, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(s_pill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(s_pill, LV_ALIGN_CENTER, 0, 214 - CY);
+    // CLICKABLE is added/removed per-render (apply_palette_and_state): the
+    // pill is only a tap target while relief is active (tap to cancel boost).
+    lv_obj_add_event_cb(s_pill, pill_event_cb, LV_EVENT_CLICKED, NULL);
 
     s_pill_glyph = lv_label_create(s_pill);
     lv_obj_set_style_text_font(s_pill_glyph, &lv_font_montserrat_16, 0);
@@ -417,6 +487,14 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_border_width(s_dot_b, 0, 0);
     lv_obj_clear_flag(s_dot_b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(s_dot_b, LV_ALIGN_CENTER, 188 - CX, 340 - CY);
+
+    // Away badge — tiny, hidden unless st->away (design-spec.md §7 extension).
+    s_away_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_away_lbl, &lv_font_montserrat_12, 0);
+    lv_label_set_text(s_away_lbl, "AWAY");
+    lv_obj_clear_flag(s_away_lbl, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_away_lbl, LV_ALIGN_CENTER, 180 - CX, 44 - CY);
+    lv_obj_add_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void destroy(void)
@@ -427,6 +505,7 @@ static void destroy(void)
     if (s_arc)        lv_anim_del(s_arc, NULL);
     if (s_pill_glyph) lv_anim_del(s_pill_glyph, NULL);
     if (s_stale_dot)  lv_anim_del(s_stale_dot, NULL);
+    if (s_boost_timer) { lv_timer_del(s_boost_timer); s_boost_timer = NULL; }
 
     s_arc = s_stale_dot = s_ghost = s_name_lbl = NULL;
     s_underline_solid = s_underline_dash = s_water_lbl = NULL;
@@ -434,8 +513,20 @@ static void destroy(void)
     s_pill = s_pill_glyph = s_pill_word = NULL;
     s_power_btn = s_power_glyph = NULL;
     s_dot_a = s_dot_b = NULL;
+    s_away_lbl = NULL;
     s_chevron_active = false;
     s_stale_shown = false;
+}
+
+// Ticks once a second while the shown zone's relief is active, just to
+// recompute the pill's mm:ss text — everything else it touches is idempotent.
+static void boost_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_arc) return;
+    app_state_t st;
+    dial_state_get(&st);
+    apply_palette_and_state(&st);
 }
 
 static void on_state(const app_state_t *st)
@@ -458,6 +549,15 @@ static void on_state(const app_state_t *st)
     }
 
     apply_palette_and_state(st);
+
+    // Countdown ticker: created on the transition into relief, deleted on the
+    // transition out (or in destroy() if the screen is torn down first).
+    if (z->relief_active && !s_boost_timer) {
+        s_boost_timer = lv_timer_create(boost_timer_cb, 1000, NULL);
+    } else if (!z->relief_active && s_boost_timer) {
+        lv_timer_del(s_boost_timer);
+        s_boost_timer = NULL;
+    }
 }
 
 static bool on_knob(int detents)
@@ -483,6 +583,11 @@ static bool on_knob(int detents)
 
 static bool on_gesture(lv_dir_t dir)
 {
+    // Only left/right swaps sides. Quick-actions opens via long-press, not a
+    // swipe on the dial itself (see screen_long_press_cb) — up/down are
+    // simply unhandled here now that the router forwards all four directions.
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return false;
+
     zone_idx_t other = (s_zone == ZONE_A) ? ZONE_B : ZONE_A;
     // Commit the side choice BEFORE navigating: the nav policy follows
     // ui_zone, so an uncommitted swipe would be undone by the next state

@@ -45,11 +45,14 @@ void ui_router_knob_input(int detents)
 screen_id_t ui_router_current(void) { return s_current; }
 
 // Swipe gestures arrive on the screen object; forward to the active screen.
+// All four directions are forwarded (SCR_QUICK/SCR_BOOST dismiss on a down
+// swipe) — screens that only care about left/right (scr_dial) filter the rest
+// out themselves and return false.
 static void gesture_cb(lv_event_t *e)
 {
     (void)e;
     lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
-    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
+    if (dir == LV_DIR_NONE) return;
     const ui_screen_t *scr = (s_current < SCR_COUNT) ? s_screens[s_current] : NULL;
     if (scr && scr->on_gesture && scr->on_gesture(dir))
         dial_state_stamp_input();

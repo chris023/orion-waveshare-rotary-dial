@@ -12,6 +12,8 @@ extern const ui_screen_t scr_wifi_portal;
 extern const ui_screen_t scr_oauth_qr;
 extern const ui_screen_t scr_dial;
 extern const ui_screen_t scr_standby;
+extern const ui_screen_t scr_quick;
+extern const ui_screen_t scr_boost;
 
 /*
  * Shared state->visual classification (design-spec.md §2's grammar table).

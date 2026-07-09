@@ -113,6 +113,13 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         // through transient outages rather than yanking the user to a status
         // screen mid-interaction.
         if (st->have_state) {
+            // Quick-actions and boost are transient overlays reached by a
+            // deliberate long-press; a routine state commit (poll landing,
+            // night-mode flip, ...) must not yank the user back to the dial
+            // mid-flow. Returning the current screen unchanged is a no-op in
+            // ui_router_go (same id + same arg), so this is safe every tick.
+            screen_id_t cur = ui_router_current();
+            if (cur == SCR_QUICK || cur == SCR_BOOST) return cur;
             *arg = (void *)(uintptr_t)st->ui_zone;
             return dial_power_level() == DPWR_STANDBY ? SCR_STANDBY : SCR_DIAL;
         }
@@ -182,9 +189,47 @@ static void mut_zone_temp(app_state_t *st, void *arg)
     st->ui_temp_f[u->zone] = -1;
 }
 
+// Response shape shared by start_thermal_relief / cancel_thermal_relief:
+// {success, zones:[{id,temp,on,thermal_relief?}, ...]}. `touched` marks which
+// zones this particular response actually described.
+typedef struct {
+    zone_state_t zones[ZONE_COUNT];
+    bool touched[ZONE_COUNT];
+} relief_ack_t;
+
+// Ack-commit for start/cancel_thermal_relief: applies the response's zones[]
+// (temp/on/relief) directly, not gated by poll_started_us — unlike
+// mut_device_state this isn't a background poll racing user input, it's the
+// direct result of a command the user just issued. Deliberately leaves
+// ui_temp_f alone (these commands come from SCR_QUICK/SCR_BOOST, never from a
+// knob turn on the dial, so there's normally no optimistic temp in flight for
+// this zone to clobber or preserve).
+static void mut_relief_ack(app_state_t *st, void *arg)
+{
+    relief_ack_t *r = arg;
+    for (int z = 0; z < ZONE_COUNT; z++) {
+        if (!r->touched[z]) continue;
+        st->zones[z].temp_c            = r->zones[z].temp_c;
+        st->zones[z].on                = r->zones[z].on;
+        st->zones[z].relief_active     = r->zones[z].relief_active;
+        st->zones[z].relief_heat       = r->zones[z].relief_heat;
+        st->zones[z].relief_end_ms     = r->zones[z].relief_end_ms;
+        st->zones[z].relief_prev_temp_c = r->zones[z].relief_prev_temp_c;
+    }
+}
+
+static void mut_bed_off(app_state_t *st, void *arg)
+{
+    (void)arg;
+    for (int z = 0; z < ZONE_COUNT; z++) st->zones[z].on = false;   // optimistic
+}
+
+static void mut_away(app_state_t *st, void *arg) { st->away = *(bool *)arg; }
+
 static void mut_oauth_url(app_state_t *st, void *arg) { strlcpy(st->oauth_url, arg, sizeof(st->oauth_url)); }
 static void mut_retry_in(app_state_t *st, void *arg)  { st->retry_in_s = *(int *)arg; }
 static void mut_ap_ssid(app_state_t *st, void *arg)   { strlcpy(st->ap_ssid, arg, sizeof(st->ap_ssid)); }
+static void mut_clock_valid(app_state_t *st, void *arg) { st->clock_valid = *(bool *)arg; }
 
 // No-op mutator: dial_state_commit() bumps the generation unconditionally, so
 // this is just a way to force the dispatcher to re-render after a palette
@@ -196,6 +241,10 @@ static void mut_bump(app_state_t *st, void *arg) { (void)st; (void)arg; }
 // it can't call dial_palette_set_night itself — this is the seam instead).
 static bool s_ui_night;
 
+// Tracks the clock-valid flag actually committed to the store, mirroring
+// s_ui_night's pattern, so the commit only fires on an actual transition.
+static bool s_ui_clock_valid;
+
 /* ---- Orion MCP calls (worker task only) -------------------------------- */
 
 static char s_serial[16];
@@ -203,6 +252,49 @@ static char s_serial[16];
 static zone_idx_t zone_idx_from_id(const char *id)
 {
     return (id && strcmp(id, "zone_b") == 0) ? ZONE_B : ZONE_A;
+}
+
+// thermal_relief is an object|null field carried on a zone entry in three
+// response shapes: get_device_state's top-level zones[], and the
+// start/cancel_thermal_relief responses' zones[] — same shape every time.
+// Null/absent means no active relief on that zone.
+static void parse_thermal_relief(cJSON *zone_obj, zone_state_t *zs)
+{
+    cJSON *relief = cJSON_GetObjectItem(zone_obj, "thermal_relief");
+    if (!cJSON_IsObject(relief)) {
+        zs->relief_active = false;
+        return;
+    }
+    cJSON *type = cJSON_GetObjectItem(relief, "type");
+    cJSON *end  = cJSON_GetObjectItem(relief, "end_time");
+    cJSON *prev = cJSON_GetObjectItem(relief, "previous_temp");
+    zs->relief_active       = true;
+    zs->relief_heat         = (type && type->valuestring && !strcmp(type->valuestring, "heat"));
+    zs->relief_end_ms       = cJSON_IsNumber(end) ? (int64_t)end->valuedouble : 0;
+    zs->relief_prev_temp_c  = cJSON_IsNumber(prev) ? (float)prev->valuedouble : zs->temp_c;
+}
+
+// Parser for start_thermal_relief / cancel_thermal_relief responses (shape:
+// relief_ack_t, above) — a subset of the get_device_state shape (no
+// status/actual-temp block), so only touch the fields this response carries.
+static bool parse_relief_ack(const char *json, relief_ack_t *out)
+{
+    cJSON *root = cJSON_Parse(json);
+    if (!root) return false;
+    cJSON *z;
+    cJSON_ArrayForEach(z, cJSON_GetObjectItem(root, "zones")) {
+        cJSON *id = cJSON_GetObjectItem(z, "id");
+        if (!id || !id->valuestring) continue;
+        zone_idx_t zi = zone_idx_from_id(id->valuestring);
+        zone_state_t *zs = &out->zones[zi];
+        cJSON *t = cJSON_GetObjectItem(z, "temp");
+        if (cJSON_IsNumber(t)) zs->temp_c = (float)t->valuedouble;
+        zs->on = cJSON_IsTrue(cJSON_GetObjectItem(z, "on"));
+        parse_thermal_relief(z, zs);
+        out->touched[zi] = true;
+    }
+    cJSON_Delete(root);
+    return true;
 }
 
 static bool orion_refresh_state(void)
@@ -228,6 +320,7 @@ static bool orion_refresh_state(void)
         cJSON *t = cJSON_GetObjectItem(z, "temp");
         if (cJSON_IsNumber(t)) zs->temp_c = (float)t->valuedouble;
         zs->on = cJSON_IsTrue(cJSON_GetObjectItem(z, "on"));
+        parse_thermal_relief(z, zs);
     }
 
     cJSON *status = cJSON_GetObjectItem(root, "status");
@@ -268,6 +361,74 @@ static bool orion_set_zone(zone_idx_t zone, const char *field_json)
     char *r = NULL;
     bool ok = dial_mcp_call_tool("set_zone", args, &r);
     if (!ok) ESP_LOGW(TAG, "set_zone %s failed: %s", field_json, dial_mcp_last_error());
+    free(r);
+    return ok;
+}
+
+// Commits the start/cancel_thermal_relief response via mut_relief_ack (an
+// ack-commit, not a poll — see that mutator's comment). Shared by both calls
+// below since the response shape is identical.
+static void commit_relief_response(const char *json)
+{
+    relief_ack_t ack = { 0 };
+    if (parse_relief_ack(json, &ack)) dial_state_commit(mut_relief_ack, &ack);
+}
+
+typedef struct { zone_idx_t zone; bool heat; int minutes; } boost_args_t;
+static bool orion_boost(void *arg)
+{
+    boost_args_t *b = arg;
+    char args[128];
+    snprintf(args, sizeof(args),
+             "{\"serial\":\"%s\",\"type\":\"%s\",\"zones\":[\"%s\"],\"duration_minutes\":%d}",
+             s_serial, b->heat ? "heat" : "cool", zone_id_str(b->zone), b->minutes);
+    char *r = NULL;
+    bool ok = dial_mcp_call_tool("start_thermal_relief", args, &r);
+    if (ok && r) commit_relief_response(r);
+    else         ESP_LOGW(TAG, "start_thermal_relief failed: %s", dial_mcp_last_error());
+    free(r);
+    return ok;
+}
+
+static bool orion_boost_cancel(void *arg)
+{
+    (void)arg;
+    char args[48];
+    snprintf(args, sizeof(args), "{\"serial\":\"%s\"}", s_serial);
+    char *r = NULL;
+    bool ok = dial_mcp_call_tool("cancel_thermal_relief", args, &r);
+    if (ok && r) commit_relief_response(r);
+    else         ESP_LOGW(TAG, "cancel_thermal_relief failed: %s", dial_mcp_last_error());
+    free(r);
+    return ok;
+}
+
+// set_zones is atomic across zones — used here so "Bed off" can never leave
+// the bed with one side on and one off from a partial failure.
+static bool orion_bed_off(void *arg)
+{
+    (void)arg;
+    char args[160];
+    snprintf(args, sizeof(args),
+             "{\"serial\":\"%s\",\"zones\":[{\"id\":\"zone_a\",\"on\":false},"
+             "{\"id\":\"zone_b\",\"on\":false}]}",
+             s_serial);
+    char *r = NULL;
+    bool ok = dial_mcp_call_tool("set_zones", args, &r);
+    if (!ok) ESP_LOGW(TAG, "set_zones (bed off) failed: %s", dial_mcp_last_error());
+    free(r);
+    return ok;
+}
+
+typedef struct { bool away; } away_args_t;
+static bool orion_set_away(void *arg)
+{
+    away_args_t *a = arg;
+    char args[32];
+    snprintf(args, sizeof(args), "{\"is_away\":%s}", a->away ? "true" : "false");
+    char *r = NULL;
+    bool ok = dial_mcp_call_tool("set_away", args, &r);
+    if (!ok) ESP_LOGW(TAG, "set_away failed: %s", dial_mcp_last_error());
     free(r);
     return ok;
 }
@@ -347,6 +508,36 @@ static bool set_zone_call(void *arg)
     return orion_set_zone(a->zone, a->field_json);
 }
 
+// CMD_BOOST_START/CANCEL, CMD_BED_OFF and CMD_AWAY are rare (a quick-actions
+// tap, not a knob spin) — no coalescing, just run them in arrival order.
+static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
+                                  const char *client_id)
+{
+    switch (cmd->kind) {
+    case CMD_BOOST_START: {
+        boost_args_t b = { cmd->zone, cmd->a != 0, cmd->b };
+        with_auth_retry(orion_boost, &b, disc, client_id);   // commits inside on success
+        break;
+    }
+    case CMD_BOOST_CANCEL:
+        with_auth_retry(orion_boost_cancel, NULL, disc, client_id);  // commits inside
+        break;
+    case CMD_BED_OFF:
+        if (with_auth_retry(orion_bed_off, NULL, disc, client_id))
+            dial_state_commit(mut_bed_off, NULL);
+        break;
+    case CMD_AWAY: {
+        bool away = cmd->a != 0;
+        away_args_t a = { away };
+        if (with_auth_retry(orion_set_away, &a, disc, client_id))
+            dial_state_commit(mut_away, &away);
+        break;
+    }
+    default:
+        break;   // CMD_SET_TEMP/CMD_TOGGLE_ON never reach here (see the drain loop)
+    }
+}
+
 static void worker_task(void *arg)
 {
     (void)arg;
@@ -420,12 +611,29 @@ static void worker_task(void *arg)
     for (;;) {
         app_cmd_t cmd;
         if (dial_cmd_receive(&cmd, 300)) {
+            // Rare, non-coalesced commands: handle the head of the queue
+            // immediately and go back around, rather than folding them into
+            // the temp/toggle coalescing loop below (which only knows those
+            // two kinds).
+            if (cmd.kind != CMD_SET_TEMP && cmd.kind != CMD_TOGGLE_ON) {
+                handle_immediate_cmd(&cmd, &disc, client_id);
+                last_poll_us = esp_timer_get_time();
+                continue;
+            }
+
             // Coalesce a burst: per zone, at most one net toggle + final temp.
+            // A burst mixing in a rare command (above) is vanishingly
+            // unlikely — quick-actions requires its own screen — but if one
+            // lands mid-drain, stop coalescing and handle it right after
+            // rather than silently mis-treating it as a toggle.
             int last_temp[ZONE_COUNT] = { -1, -1 };
             int toggles[ZONE_COUNT]   = { 0, 0 };
+            bool have_pending = false;
+            app_cmd_t pending;
             do {
-                if (cmd.kind == CMD_SET_TEMP) last_temp[cmd.zone] = cmd.temp_f;
-                else                          toggles[cmd.zone]++;
+                if (cmd.kind == CMD_SET_TEMP)       last_temp[cmd.zone] = cmd.temp_f;
+                else if (cmd.kind == CMD_TOGGLE_ON) toggles[cmd.zone]++;
+                else { have_pending = true; pending = cmd; break; }
             } while (dial_cmd_receive(&cmd, 0));
 
             for (int z = 0; z < ZONE_COUNT; z++) {
@@ -448,9 +656,19 @@ static void worker_task(void *arg)
                         dial_state_commit(mut_zone_temp, &up);
                 }
             }
+            if (have_pending) handle_immediate_cmd(&pending, &disc, client_id);
+
             // Push the poll's T0 out so the resync waits for quiet after this.
             last_poll_us = esp_timer_get_time();
             continue;
+        }
+
+        // Publish clock validity so the dial's boost countdown (mm:ss, needs
+        // real wall time) can fall back to a bare "BOOST" before SNTP syncs.
+        bool clock_valid = dial_time_valid();
+        if (clock_valid != s_ui_clock_valid) {
+            s_ui_clock_valid = clock_valid;
+            dial_state_commit(mut_clock_valid, &clock_valid);
         }
 
         // Night mode: warm-dim + quiet haptics while the household sleeps.

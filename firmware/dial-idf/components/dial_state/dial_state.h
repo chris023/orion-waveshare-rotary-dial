@@ -47,13 +47,16 @@ typedef struct {
     bool  on;
     char  thermal_state[12]; // "standby" | "holding" | (heating/cooling presumed)
     char  user_name[24];     // first name from list_devices zones[].user ("" = unknown)
-} zone_state_t;
 
-typedef struct {
-    bool    active;
-    bool    heat;            // else cool
-    int64_t end_epoch_s;     // 0 = unknown end time
-} relief_state_t;
+    // Thermal relief ("boost"), parsed from top-level zones[].thermal_relief
+    // (get_device_state) or the start/cancel_thermal_relief response's zones[]
+    // — same shape in all three. Null/absent thermal_relief = relief_active
+    // false and the rest of these are stale/don't-care.
+    bool    relief_active;
+    bool    relief_heat;      // true = heat, false = cool
+    int64_t relief_end_ms;    // epoch MILLISECONDS (API's units, not seconds)
+    float   relief_prev_temp_c;
+} zone_state_t;
 
 typedef struct {
     // Connection / lifecycle
@@ -68,9 +71,9 @@ typedef struct {
     char    serial[16];
     bool    device_online;
     zone_state_t zones[ZONE_COUNT];
-    relief_state_t relief;
     struct { bool error; char desc[96]; } safety;
     char    water_fill[12];
+    bool    away;             // session-optimistic (set_away has no readback)
 
     // Wall clock
     bool    clock_valid;
@@ -116,14 +119,20 @@ int64_t dial_state_last_input_us(void);
  * drains, coalescing bursts (a knob spin collapses to one set_zone).
  */
 typedef enum {
-    CMD_SET_TEMP,   // zone + temp_f
-    CMD_TOGGLE_ON,  // zone
+    CMD_SET_TEMP,      // zone + temp_f
+    CMD_TOGGLE_ON,     // zone
+    CMD_BOOST_START,   // zone + a=heat?1:0 + b=minutes
+    CMD_BOOST_CANCEL,  // zone ignored — cancels relief on every zone
+    CMD_BED_OFF,       // zone ignored — both zones off, atomically
+    CMD_AWAY,          // a=1 away / 0 home
 } cmd_kind_t;
 
 typedef struct {
     cmd_kind_t kind;
     zone_idx_t zone;
-    int        temp_f;
+    int        temp_f;  // CMD_SET_TEMP
+    int        a, b;    // generic args: CMD_BOOST_START (a=heat, b=minutes),
+                         // CMD_AWAY (a=away)
 } app_cmd_t;
 
 void dial_cmd_post(const app_cmd_t *cmd);
