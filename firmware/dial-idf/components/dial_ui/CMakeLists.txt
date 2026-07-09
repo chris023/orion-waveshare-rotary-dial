@@ -1,5 +1,11 @@
 idf_component_register(
     SRCS "ui_router.c" "ui_screens.c" "scr_connecting.c" "scr_setup.c" "scr_dial.c"
+         "scr_standby.c" "dial_palette.c" "dial_font_num_88.c"
     INCLUDE_DIRS "."
     REQUIRES dial_state
-    PRIV_REQUIRES esp_timer dial_haptics)
+    PRIV_REQUIRES esp_timer dial_haptics dial_power)
+
+# lv_font_conv emits a font source that includes "lvgl.h" directly (not via
+# the project's lv_conf-relative path) unless told to use the simple include.
+set_source_files_properties(dial_font_num_88.c PROPERTIES
+    COMPILE_OPTIONS -DLV_LVGL_H_INCLUDE_SIMPLE)

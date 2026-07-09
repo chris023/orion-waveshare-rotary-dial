@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "dial_power.h"
 
 static const char *TAG = "ui_router";
 
@@ -12,6 +13,11 @@ static screen_id_t        s_current = SCR_COUNT;   // none yet
 static void              *s_current_arg;
 static lv_timer_t        *s_dispatch;
 static uint32_t           s_rendered_gen;
+// dial_power's idle clock drives the standby/dial split independently of any
+// state commit; polling it here (cheap: a volatile read) lets idle->standby
+// and wake->dial transitions happen on their own tick instead of waiting for
+// the next device-state generation bump.
+static dial_power_level_t s_rendered_power_level = DPWR_ACTIVE;
 
 // Knob detents accumulated from the decoder's esp_timer task; drained by the
 // dispatcher in the LVGL task. Guarded by a spinlock: the decoder must never
@@ -96,8 +102,12 @@ static void dispatch_tick(lv_timer_t *t)
 
     app_state_t st;
     dial_state_get(&st);
-    if (st.generation != s_rendered_gen) {
+    dial_power_level_t power_level = dial_power_level();
+    bool gen_changed   = (st.generation != s_rendered_gen);
+    bool power_changed = (power_level != s_rendered_power_level);
+    if (gen_changed || power_changed) {
         s_rendered_gen = st.generation;
+        s_rendered_power_level = power_level;
         if (s_nav_policy) {
             void *arg = s_current_arg;
             screen_id_t want = s_nav_policy(&st, &arg);

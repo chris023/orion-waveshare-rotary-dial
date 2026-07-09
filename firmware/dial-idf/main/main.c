@@ -31,6 +31,7 @@
 #include "dial_time.h"
 #include "dial_haptics.h"
 #include "dial_power.h"
+#include "dial_palette.h"
 #include "bidi_switch_knob.h"
 #include "secrets.h"
 #include "cJSON.h"
@@ -113,7 +114,7 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         // screen mid-interaction.
         if (st->have_state) {
             *arg = (void *)(uintptr_t)st->ui_zone;
-            return SCR_DIAL;
+            return dial_power_level() == DPWR_STANDBY ? SCR_STANDBY : SCR_DIAL;
         }
         return st->phase == PH_READY ? SCR_CONNECTING : SCR_ERROR;
     default:                    return SCR_CONNECTING;
@@ -176,6 +177,16 @@ static void mut_zone_temp(app_state_t *st, void *arg)
 static void mut_oauth_url(app_state_t *st, void *arg) { strlcpy(st->oauth_url, arg, sizeof(st->oauth_url)); }
 static void mut_retry_in(app_state_t *st, void *arg)  { st->retry_in_s = *(int *)arg; }
 static void mut_ap_ssid(app_state_t *st, void *arg)   { strlcpy(st->ap_ssid, arg, sizeof(st->ap_ssid)); }
+
+// No-op mutator: dial_state_commit() bumps the generation unconditionally, so
+// this is just a way to force the dispatcher to re-render after a palette
+// swap (screens re-read PAL() from on_state; they never cache day/night).
+static void mut_bump(app_state_t *st, void *arg) { (void)st; (void)arg; }
+
+// Tracks the night flag actually applied to the UI palette, separate from
+// dial_power's own internal one (dial_power.c must not depend on dial_ui, so
+// it can't call dial_palette_set_night itself — this is the seam instead).
+static bool s_ui_night;
 
 /* ---- Orion MCP calls (worker task only) -------------------------------- */
 
@@ -427,8 +438,18 @@ static void worker_task(void *arg)
         // Fixed 21:00-07:00 window until the schedule screens land (M5 pulls
         // the real bedtime/wake from get_sleep_schedules).
         struct tm lt;
-        if (dial_time_now(&lt))
-            dial_power_set_night(lt.tm_hour >= 21 || lt.tm_hour < 7);
+        if (dial_time_now(&lt)) {
+            bool night = (lt.tm_hour >= 21 || lt.tm_hour < 7);
+            dial_power_set_night(night);
+            // Swap the UI palette too, and force a re-render — screens read
+            // PAL() from on_state, so a bare palette swap without a commit
+            // would sit unapplied until the next unrelated state change.
+            if (night != s_ui_night) {
+                s_ui_night = night;
+                dial_palette_set_night(night);
+                dial_state_commit(mut_bump, NULL);
+            }
+        }
 
         // No command this tick. Resync only when quiet AND due.
         int64_t now = esp_timer_get_time();
