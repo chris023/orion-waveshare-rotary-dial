@@ -1,7 +1,10 @@
 #include <stdio.h>
 
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/event_groups.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
@@ -67,6 +70,192 @@ static void ui_show_msg(const char *msg)
 }
 
 // OAuth: get a usable access token (stored, refreshed, or via on-screen consent).
+/* ========================= Orion control ============================== *
+ * The rotary encoder lives on the companion MCU, so for now this dial is
+ * driven by the working touchscreen: an LVGL arc you drag to set the target
+ * temperature and a button to toggle the zone on/off. Touch events post
+ * commands to a worker (the oauth_task loop) that owns the MCP session; the
+ * worker polls get_device_state and pushes the truth back to the UI.
+ */
+
+#define ORION_ZONE  "zone_a"      // this dial controls zone_a (owner side)
+#define TEMP_MIN_F  55
+#define TEMP_MAX_F  110
+
+typedef enum { CMD_SET_TEMP, CMD_TOGGLE_ON } orion_cmd_kind_t;
+typedef struct { orion_cmd_kind_t kind; int temp_f; } orion_cmd_t;
+
+static QueueHandle_t     s_cmd_q;
+static SemaphoreHandle_t s_state_mux;
+static char  s_serial[16];
+static float s_temp_c;       // last known device temp for our zone (°C)
+static bool  s_on;
+static bool  s_online;
+static bool  s_have_state;
+
+static lv_obj_t *s_arc, *s_temp_lbl, *s_state_lbl;
+
+// Orion works in °C; this US user's app shows °F. The device's own conversion
+// table is the linear formula rounded to 0.1°C, so linear round-trips exactly.
+static inline int   c_to_f(float c) { return (int)lroundf(c * 1.8f + 32.0f); }
+static inline float f_to_c(int f)   { return roundf(((f - 32) / 1.8f) * 10.0f) / 10.0f; }
+
+// ---- UI (all callers below hold the LVGL mux where noted) ----
+
+// Update the center readout. Caller must hold the LVGL mux.
+static void ui_set_center(int temp_f, bool on, bool online)
+{
+    char t[8];
+    snprintf(t, sizeof(t), "%d", temp_f);
+    lv_label_set_text(s_temp_lbl, t);
+    lv_label_set_text(s_state_lbl, !online ? "OFFLINE" : (on ? "ON" : "OFF"));
+    lv_color_t c = !online ? lv_color_hex(0x666666)
+                           : (on ? lv_color_hex(0xff7043) : lv_color_hex(0x5b8def));
+    lv_obj_set_style_text_color(s_temp_lbl, c, 0);
+    lv_obj_set_style_arc_color(s_arc, c, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(s_arc, on ? LV_OPA_COVER : LV_OPA_40, LV_PART_INDICATOR);
+}
+
+// LVGL event callbacks run inside lv_timer_handler, which already holds the
+// LVGL mux — so they must NOT re-lock. They only touch LVGL + post to the queue.
+static void arc_event_cb(lv_event_t *e)
+{
+    int f = lv_arc_get_value(s_arc);
+    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
+        char t[8];
+        snprintf(t, sizeof(t), "%d", f);
+        lv_label_set_text(s_temp_lbl, t);          // live feedback while dragging
+    } else {                                        // LV_EVENT_RELEASED
+        orion_cmd_t cmd = { .kind = CMD_SET_TEMP, .temp_f = f };
+        xQueueSend(s_cmd_q, &cmd, 0);
+    }
+}
+
+static void power_event_cb(lv_event_t *e)
+{
+    orion_cmd_t cmd = { .kind = CMD_TOGGLE_ON };
+    xQueueSend(s_cmd_q, &cmd, 0);
+}
+
+static void ui_build_dial(void)
+{
+    if (!example_lvgl_lock(-1)) return;
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_clean(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+
+    s_arc = lv_arc_create(scr);
+    lv_obj_set_size(s_arc, 320, 320);
+    lv_obj_center(s_arc);
+    lv_arc_set_rotation(s_arc, 135);
+    lv_arc_set_bg_angles(s_arc, 0, 270);
+    lv_arc_set_range(s_arc, TEMP_MIN_F, TEMP_MAX_F);
+    lv_arc_set_value(s_arc, (TEMP_MIN_F + TEMP_MAX_F) / 2);
+    lv_obj_set_style_arc_width(s_arc, 16, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_arc, 16, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_arc, lv_color_hex(0x2a2a2a), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_arc, lv_color_hex(0xffffff), LV_PART_KNOB);
+    lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_RELEASED, NULL);
+
+    lv_obj_t *zone = lv_label_create(scr);
+    lv_obj_set_style_text_font(zone, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(zone, lv_color_hex(0x888888), 0);
+    lv_label_set_text(zone, "MY SIDE");
+    lv_obj_align(zone, LV_ALIGN_CENTER, 0, -66);
+
+    s_temp_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_temp_lbl, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(s_temp_lbl, lv_color_hex(0xff7043), 0);
+    lv_label_set_text(s_temp_lbl, "--");
+    lv_obj_align(s_temp_lbl, LV_ALIGN_CENTER, 0, -8);
+
+    lv_obj_t *unit = lv_label_create(scr);
+    lv_obj_set_style_text_font(unit, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(unit, lv_color_hex(0xaaaaaa), 0);
+    lv_label_set_text(unit, "\xC2\xB0" "F");        // UTF-8 degree sign + F
+    lv_obj_align_to(unit, s_temp_lbl, LV_ALIGN_OUT_RIGHT_TOP, 4, 8);
+
+    lv_obj_t *btn = lv_btn_create(scr);
+    lv_obj_set_size(btn, 104, 44);
+    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 62);
+    lv_obj_set_style_radius(btn, 22, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1e1e1e), 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x444444), 0);
+    lv_obj_add_event_cb(btn, power_event_cb, LV_EVENT_CLICKED, NULL);
+    s_state_lbl = lv_label_create(btn);
+    lv_obj_set_style_text_font(s_state_lbl, &lv_font_montserrat_16, 0);
+    lv_label_set_text(s_state_lbl, "--");
+    lv_obj_center(s_state_lbl);
+
+    example_lvgl_unlock();
+}
+
+// Push the shared device state into the UI (called from the worker task).
+static void ui_apply_state(void)
+{
+    xSemaphoreTake(s_state_mux, portMAX_DELAY);
+    int  f      = c_to_f(s_temp_c);
+    bool on     = s_on;
+    bool online = s_online;
+    bool have   = s_have_state;
+    xSemaphoreGive(s_state_mux);
+    if (!have) return;
+    if (!example_lvgl_lock(-1)) return;
+    lv_arc_set_value(s_arc, f);
+    ui_set_center(f, on, online);
+    example_lvgl_unlock();
+}
+
+// ---- Orion MCP tool calls (run on the worker task) ----
+
+static bool orion_refresh_state(void)
+{
+    char args[48];
+    snprintf(args, sizeof(args), "{\"serial\":\"%s\"}", s_serial);
+    char *json = NULL;
+    if (!dial_mcp_call_tool("get_device_state", args, &json) || !json) return false;
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root) return false;
+
+    bool online = false, on = false, found = false;
+    float temp = 0;
+    cJSON *status = cJSON_GetObjectItem(root, "status");
+    if (status) online = cJSON_IsTrue(cJSON_GetObjectItem(status, "online"));
+    cJSON *z;
+    cJSON_ArrayForEach(z, cJSON_GetObjectItem(root, "zones")) {
+        cJSON *id = cJSON_GetObjectItem(z, "id");
+        if (id && id->valuestring && strcmp(id->valuestring, ORION_ZONE) == 0) {
+            cJSON *t = cJSON_GetObjectItem(z, "temp");
+            if (cJSON_IsNumber(t)) temp = (float)t->valuedouble;
+            on = cJSON_IsTrue(cJSON_GetObjectItem(z, "on"));
+            found = true;
+        }
+    }
+    cJSON_Delete(root);
+    if (!found) return false;
+
+    xSemaphoreTake(s_state_mux, portMAX_DELAY);
+    s_temp_c = temp; s_on = on; s_online = online; s_have_state = true;
+    xSemaphoreGive(s_state_mux);
+    return true;
+}
+
+static bool orion_set_zone(const char *field_json)
+{
+    char args[96];
+    snprintf(args, sizeof(args), "{\"serial\":\"%s\",\"zone_id\":\"%s\",%s}",
+             s_serial, ORION_ZONE, field_json);
+    char *r = NULL;
+    bool ok = dial_mcp_call_tool("set_zone", args, &r);
+    ESP_LOGI(TAG, "set_zone %s -> %s (%s)", field_json, ok ? "ok" : "fail",
+             ok ? "" : dial_mcp_last_error());
+    free(r);
+    return ok;
+}
+
 static void oauth_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -107,64 +296,71 @@ static void oauth_task(void *arg)
         }
     }
 
-    ui_show_msg("Connected to Orion");
+    ui_show_msg("Connecting to Orion...");
 
-    // ---- MCP probe: initialize -> tools/list -> list_devices -> state ----
+    // ---- Open the MCP session ----
     char *server = NULL;
     if (!dial_mcp_connect(&server)) {
         char msg[256];
-        snprintf(msg, sizeof(msg), "MCP connect failed:\n%s", dial_mcp_last_error());
+        snprintf(msg, sizeof(msg), "Orion connect failed:\n%s", dial_mcp_last_error());
         ui_show_msg(msg);
         vTaskDelete(NULL);
         return;
     }
-    ESP_LOGI(TAG, "MCP server: %s", server ? server : "?");
+    ESP_LOGI(TAG, "MCP server: %s, %d tools", server ? server : "?",
+             dial_mcp_list_tools_count());
+    free(server);
 
-    int ntools = dial_mcp_list_tools_count();
-    ESP_LOGI(TAG, "tools/list -> %d tools", ntools);
-
-    char devscreen[256];
-    snprintf(devscreen, sizeof(devscreen), "Orion linked\n%s\n%d tools",
-             server ? server : "", ntools);
-
-    // list_devices -> extract first serial_number, then get_device_state.
+    // ---- Find this bed's serial from list_devices ----
     char *devices = NULL;
     if (dial_mcp_call_tool("list_devices", "{}", &devices) && devices) {
-        ESP_LOGI(TAG, "=== list_devices ===");
-        for (size_t i = 0; i < strlen(devices); i += 512)
-            ESP_LOGI(TAG, "%.512s", devices + i);   // chunked so nothing is dropped
-
         cJSON *root = cJSON_Parse(devices);
-        cJSON *arr = root ? cJSON_GetObjectItem(root, "devices") : NULL;
+        cJSON *arr  = root ? cJSON_GetObjectItem(root, "devices") : NULL;
         cJSON *dev0 = cJSON_IsArray(arr) ? cJSON_GetArrayItem(arr, 0) : NULL;
         cJSON *serial = dev0 ? cJSON_GetObjectItem(dev0, "serial_number") : NULL;
-        cJSON *name   = dev0 ? cJSON_GetObjectItem(dev0, "name") : NULL;
-        if (serial && serial->valuestring) {
-            snprintf(devscreen, sizeof(devscreen), "%s\n%d tools",
-                     (name && name->valuestring) ? name->valuestring : "Orion device",
-                     ntools);
-            char args[64];
-            snprintf(args, sizeof(args), "{\"serial\":\"%s\"}", serial->valuestring);
-            char *state = NULL;
-            if (dial_mcp_call_tool("get_device_state", args, &state) && state) {
-                ESP_LOGI(TAG, "=== get_device_state(%s) ===", serial->valuestring);
-                for (size_t i = 0; i < strlen(state); i += 512)
-                    ESP_LOGI(TAG, "%.512s", state + i);
-                free(state);
-            } else {
-                ESP_LOGW(TAG, "get_device_state failed: %s", dial_mcp_last_error());
+        if (serial && serial->valuestring)
+            strlcpy(s_serial, serial->valuestring, sizeof(s_serial));
+        if (root) cJSON_Delete(root);
+    }
+    free(devices);
+    if (!s_serial[0]) {
+        ui_show_msg("No Orion device\non this account");
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "controlling serial %s zone %s", s_serial, ORION_ZONE);
+
+    // ---- Build the touch dial and enter the command + poll loop ----
+    s_cmd_q     = xQueueCreate(8, sizeof(orion_cmd_t));
+    s_state_mux = xSemaphoreCreateMutex();
+    orion_refresh_state();
+    ui_build_dial();
+    ui_apply_state();
+
+    for (;;) {
+        orion_cmd_t cmd;
+        // Wake on a touch command, or every ~10s to catch app/other-dial changes.
+        if (xQueueReceive(s_cmd_q, &cmd, pdMS_TO_TICKS(10000)) == pdTRUE) {
+            if (cmd.kind == CMD_SET_TEMP) {
+                char f[24];
+                snprintf(f, sizeof(f), "\"temp\":%.1f", f_to_c(cmd.temp_f));
+                orion_set_zone(f);
+            } else { // CMD_TOGGLE_ON
+                xSemaphoreTake(s_state_mux, portMAX_DELAY);
+                bool cur = s_on;
+                xSemaphoreGive(s_state_mux);
+                orion_set_zone(cur ? "\"on\":false" : "\"on\":true");
             }
         }
-        if (root) cJSON_Delete(root);
-        free(devices);
-    } else {
-        ESP_LOGW(TAG, "list_devices failed: %s", dial_mcp_last_error());
+        // Keep the token fresh, then resync the display to the device truth.
+        if (!dial_oauth_have_valid_access())
+            dial_oauth_refresh(&disc, client_id);
+        if (!orion_refresh_state() && dial_oauth_refresh(&disc, client_id)) {
+            dial_mcp_connect(NULL);       // token rotated — reopen the session
+            orion_refresh_state();
+        }
+        ui_apply_state();
     }
-
-    free(server);
-    ui_show_msg(devscreen);
-    // Next: temperature UI (rotate=set_zone, tap=on/off, long-press=thermal relief).
-    vTaskDelete(NULL);
 }
 static SemaphoreHandle_t lvgl_mux = NULL;
 
