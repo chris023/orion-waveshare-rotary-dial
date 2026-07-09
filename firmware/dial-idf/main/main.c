@@ -26,6 +26,7 @@
 #include "dial_wifi.h"
 #include "dial_oauth.h"
 #include "dial_mcp.h"
+#include "bidi_switch_knob.h"
 #include "secrets.h"
 #include "cJSON.h"
 static const char *TAG = "example";
@@ -95,6 +96,24 @@ static bool  s_have_state;
 
 static lv_obj_t *s_arc, *s_temp_lbl, *s_state_lbl;
 
+// Rotary encoder on GPIO8 (A) / GPIO7 (B). The encoder is only electrically
+// live under the full board init (display+touch up) — bare-GPIO probes read it
+// dead. Decoded by Waveshare's bidi_switch_knob (iot_knob), the same decoder the
+// stock firmware uses for this exact detented part. Each detent -> a left/right
+// event -> a 1°F step on the setpoint.
+#define KNOB_A 8
+#define KNOB_B 7
+static knob_handle_t s_knob;
+static volatile int  s_ui_temp_f = -1;   // current shown setpoint (°F); -1 = unknown
+
+// Device resync is gated on a quiet period: every user input stamps this, and
+// the poll only reads the bed back once there's been no input for a while (so an
+// update can never land mid-interaction). The poll interval is measured from T0
+// = the last input, not wall-clock.
+static volatile int64_t s_last_input_us;
+#define KNOB_SETTLE_US    2500000    // 2.5s of no input before the bed is read back
+#define POLL_INTERVAL_US 10000000    // and at most every ~10s when idle
+
 // Orion works in °C; this US user's app shows °F. The device's own conversion
 // table is the linear formula rounded to 0.1°C, so linear round-trips exactly.
 static inline int   c_to_f(float c) { return (int)lroundf(c * 1.8f + 32.0f); }
@@ -120,6 +139,7 @@ static void ui_set_center(int temp_f, bool on, bool online)
 // LVGL mux — so they must NOT re-lock. They only touch LVGL + post to the queue.
 static void arc_event_cb(lv_event_t *e)
 {
+    s_last_input_us = esp_timer_get_time();
     int f = lv_arc_get_value(s_arc);
     if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
         char t[8];
@@ -133,6 +153,7 @@ static void arc_event_cb(lv_event_t *e)
 
 static void power_event_cb(lv_event_t *e)
 {
+    s_last_input_us = esp_timer_get_time();
     orion_cmd_t cmd = { .kind = CMD_TOGGLE_ON };
     xQueueSend(s_cmd_q, &cmd, 0);
 }
@@ -200,12 +221,50 @@ static void ui_apply_state(void)
     bool on     = s_on;
     bool online = s_online;
     bool have   = s_have_state;
+    if (have) s_ui_temp_f = f;     // keep the knob's baseline synced to the device
     xSemaphoreGive(s_state_mux);
     if (!have) return;
     if (!example_lvgl_lock(-1)) return;
     lv_arc_set_value(s_arc, f);
     ui_set_center(f, on, online);
     example_lvgl_unlock();
+}
+
+// ---- Rotary knob -> temperature setpoint ----
+// A knob detent adjusts the setpoint by 1°F: update UI optimistically and queue
+// a set_zone. Runs in the decoder's esp_timer task, so it only touches the
+// queue + the two mutexes (never blocks on the network).
+static void knob_apply_step(int delta_f)
+{
+    if (!s_cmd_q) return;
+    s_last_input_us = esp_timer_get_time();
+    xSemaphoreTake(s_state_mux, portMAX_DELAY);
+    int cur = (s_ui_temp_f >= 0) ? s_ui_temp_f : c_to_f(s_temp_c);
+    int nf  = cur + delta_f;
+    if (nf < TEMP_MIN_F) nf = TEMP_MIN_F;
+    if (nf > TEMP_MAX_F) nf = TEMP_MAX_F;
+    s_ui_temp_f = nf;
+    bool on = s_on;
+    xSemaphoreGive(s_state_mux);
+
+    if (example_lvgl_lock(50)) {
+        lv_arc_set_value(s_arc, nf);
+        ui_set_center(nf, on, true);
+        example_lvgl_unlock();
+    }
+    orion_cmd_t cmd = { .kind = CMD_SET_TEMP, .temp_f = nf };
+    xQueueSend(s_cmd_q, &cmd, 0);
+}
+static void knob_left_cb(void *arg, void *data)  { knob_apply_step(-1); }  // CCW = cooler
+static void knob_right_cb(void *arg, void *data) { knob_apply_step(+1); }  // CW  = warmer
+static void knob_init(void)
+{
+    knob_config_t cfg = { .gpio_encoder_a = KNOB_A, .gpio_encoder_b = KNOB_B };
+    s_knob = iot_knob_create(&cfg);
+    if (!s_knob) { ESP_LOGE(TAG, "knob create failed"); return; }
+    iot_knob_register_cb(s_knob, KNOB_LEFT, knob_left_cb, NULL);
+    iot_knob_register_cb(s_knob, KNOB_RIGHT, knob_right_cb, NULL);
+    ESP_LOGI(TAG, "knob ready on GPIO%d/%d", KNOB_A, KNOB_B);
 }
 
 // ---- Orion MCP tool calls (run on the worker task) ----
@@ -330,29 +389,62 @@ static void oauth_task(void *arg)
     }
     ESP_LOGI(TAG, "controlling serial %s zone %s", s_serial, ORION_ZONE);
 
-    // ---- Build the touch dial and enter the command + poll loop ----
-    s_cmd_q     = xQueueCreate(8, sizeof(orion_cmd_t));
+    // ---- Build the touch dial, start the knob, enter the command + poll loop ----
+    s_cmd_q     = xQueueCreate(16, sizeof(orion_cmd_t));
     s_state_mux = xSemaphoreCreateMutex();
     orion_refresh_state();
     ui_build_dial();
     ui_apply_state();
+    knob_init();     // safe now: queue + mutex + UI all exist
 
+    int64_t last_poll_us = esp_timer_get_time();
     for (;;) {
         orion_cmd_t cmd;
-        // Wake on a touch command, or every ~10s to catch app/other-dial changes.
-        if (xQueueReceive(s_cmd_q, &cmd, pdMS_TO_TICKS(10000)) == pdTRUE) {
-            if (cmd.kind == CMD_SET_TEMP) {
-                char f[24];
-                snprintf(f, sizeof(f), "\"temp\":%.1f", f_to_c(cmd.temp_f));
-                orion_set_zone(f);
-            } else { // CMD_TOGGLE_ON
+        // Short tick so the loop stays responsive to commands; the device
+        // readback is gated separately on the quiet-period below.
+        if (xQueueReceive(s_cmd_q, &cmd, pdMS_TO_TICKS(300)) == pdTRUE) {
+            // Coalesce a burst (e.g. spinning the knob): collapse to at most one
+            // net on/off toggle + the final target temperature.
+            int  last_temp = -1, toggles = 0;
+            do {
+                if (cmd.kind == CMD_SET_TEMP) last_temp = cmd.temp_f;
+                else toggles++;
+            } while (xQueueReceive(s_cmd_q, &cmd, 0) == pdTRUE);
+
+            if (toggles & 1) {
                 xSemaphoreTake(s_state_mux, portMAX_DELAY);
                 bool cur = s_on;
                 xSemaphoreGive(s_state_mux);
-                orion_set_zone(cur ? "\"on\":false" : "\"on\":true");
+                if (orion_set_zone(cur ? "\"on\":false" : "\"on\":true")) {
+                    xSemaphoreTake(s_state_mux, portMAX_DELAY);
+                    s_on = !cur;                 // optimistic: trust the change
+                    xSemaphoreGive(s_state_mux);
+                }
             }
+            if (last_temp >= 0) {
+                char f[24];
+                snprintf(f, sizeof(f), "\"temp\":%.1f", f_to_c(last_temp));
+                if (orion_set_zone(f)) {
+                    xSemaphoreTake(s_state_mux, portMAX_DELAY);
+                    s_temp_c = f_to_c(last_temp);  // optimistic: trust the change
+                    xSemaphoreGive(s_state_mux);
+                }
+            }
+            // Reflect the (optimistic) local state. Deliberately NO device
+            // readback here: the bed lags a beat. Also push the poll's T0 out so
+            // the resync waits for the quiet period after this input.
+            ui_apply_state();
+            last_poll_us = esp_timer_get_time();
+            continue;
         }
-        // Keep the token fresh, then resync the display to the device truth.
+
+        // No command this tick. Resync to the device truth only when it's been
+        // quiet (no input for KNOB_SETTLE_US) AND a poll interval has elapsed —
+        // so an update can never land mid-interaction.
+        int64_t now = esp_timer_get_time();
+        if (now - s_last_input_us < KNOB_SETTLE_US) continue;
+        if (now - last_poll_us < POLL_INTERVAL_US) continue;
+
         if (!dial_oauth_have_valid_access())
             dial_oauth_refresh(&disc, client_id);
         if (!orion_refresh_state() && dial_oauth_refresh(&disc, client_id)) {
@@ -360,6 +452,7 @@ static void oauth_task(void *arg)
             orion_refresh_state();
         }
         ui_apply_state();
+        last_poll_us = esp_timer_get_time();
     }
 }
 static SemaphoreHandle_t lvgl_mux = NULL;
@@ -812,6 +905,7 @@ void app_main(void)
     ui_show_msg("Linking to Orion...");
 
     // OAuth runs in its own task with a generous stack: the TLS handshake plus
-    // the token exchange (large JSON) overflow smaller stacks.
+    // the token exchange (large JSON) overflow smaller stacks. The rotary knob
+    // is started from inside that task once the UI + command queue exist.
     xTaskCreate(oauth_task, "oauth", 16384, NULL, 4, NULL);
 }
