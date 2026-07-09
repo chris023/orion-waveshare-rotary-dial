@@ -86,6 +86,10 @@ typedef struct {
 // Initialize the store (mutex + defaults). Call once before any other call.
 void dial_state_init(void);
 
+// Restore persisted UI preferences (last shown side). Requires NVS to be
+// initialized, so call after dial_net_init, before the first real screen.
+void dial_state_restore_prefs(void);
+
 // Copy the current state under the store mutex.
 void dial_state_get(app_state_t *out);
 
@@ -97,6 +101,11 @@ void dial_state_set_phase(conn_phase_t phase, const char *err);
 
 // Hot-path setter used by the dial screen during knob/drag interaction.
 void dial_state_set_ui_temp(zone_idx_t zone, int temp_f);
+
+// Record which side the UI is showing. The nav policy follows this, so any
+// screen that switches sides MUST commit it here (or the next state commit
+// navigates right back — the side choice lives in the store, not the router).
+void dial_state_set_ui_zone(zone_idx_t zone);
 
 // --- Input quiet-period gate (torn-read-safe on 32-bit) ---
 void    dial_state_stamp_input(void);   // call on EVERY user input

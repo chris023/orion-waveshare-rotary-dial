@@ -455,6 +455,7 @@ void app_main(void)
 
     dial_net_on_event(net_event_cb);
     dial_net_init();
+    dial_state_restore_prefs();   // last shown side (needs NVS, hence after net init)
     dial_net_seed(WIFI_SSID, WIFI_PASSWORD);
     dial_state_commit(mut_ap_ssid, (void *)dial_net_ap_ssid());
 

@@ -162,8 +162,11 @@ static bool on_knob(int detents)
 
 static bool on_gesture(lv_dir_t dir)
 {
-    (void)dir;
     zone_idx_t other = (s_zone == ZONE_A) ? ZONE_B : ZONE_A;
+    // Commit the side choice BEFORE navigating: the nav policy follows
+    // ui_zone, so an uncommitted swipe would be undone by the next state
+    // commit (the poll would yank the view back to the previous side).
+    dial_state_set_ui_zone(other);
     ui_router_go(SCR_DIAL, (void *)(uintptr_t)other,
                  dir == LV_DIR_LEFT ? LV_SCR_LOAD_ANIM_MOVE_LEFT
                                     : LV_SCR_LOAD_ANIM_MOVE_RIGHT);
