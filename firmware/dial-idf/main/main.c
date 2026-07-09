@@ -17,7 +17,6 @@
 #include "esp_log.h"
 
 #include "lvgl.h"
-#include "lv_demos.h"
 #include "esp_lcd_sh8601.h"
 #include "i2c_bsp.h"
 #include "lcd_touch_bsp.h"

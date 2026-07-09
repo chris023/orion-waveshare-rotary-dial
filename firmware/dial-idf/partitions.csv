@@ -1,5 +1,11 @@
 # Name,   Type, SubType, Offset,  Size, Flags
-# Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
-nvs,      data, nvs,     ,         0x6000,
-phy_init, data, phy,     ,         0x1000,
-factory,  app,  factory, ,         8M,
+# 16MB flash, dual OTA slots so updates can ship over the air with rollback.
+# nvs is generous (Wi-Fi creds + OAuth tokens + UI prefs live here).
+# assets reserves the tail for future fonts/images/models without repartitioning
+# (repartitioning wipes NVS and forces re-onboarding of every flashed unit).
+nvs,      data, nvs,     ,        64K,
+otadata,  data, ota,     ,        8K,
+phy_init, data, phy,     ,        4K,
+ota_0,    app,  ota_0,   ,        4M,
+ota_1,    app,  ota_1,   ,        4M,
+assets,   data, spiffs,  ,        7936K,
