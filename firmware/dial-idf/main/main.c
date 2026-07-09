@@ -461,12 +461,14 @@ void app_main(void)
 #ifdef Backlight_Testing
     xTaskCreate(example_backlight_test_task, "backlight", 3 * 1024, NULL, 2, NULL);
 #endif
-    // Bring up Wi-Fi (credentials from secrets.h). Non-fatal if it times out —
-    // it keeps retrying in the background while the UI runs.
-    if (dial_wifi_start(WIFI_SSID, WIFI_PASSWORD, 20000))
-        ESP_LOGI(TAG, "Wi-Fi connected");
-    else
-        ESP_LOGW(TAG, "Wi-Fi not connected yet (retrying in background)");
+    // Bring up Wi-Fi: connect with stored creds, else run the SoftAP captive
+    // portal. Seed from secrets.h in dev so we can skip the portal while iterating.
+    dial_net_init();
+    dial_net_seed(WIFI_SSID, WIFI_PASSWORD);
+    if (!dial_net_have_creds())
+        ESP_LOGW(TAG, "no Wi-Fi creds — join AP \"%s\" to set up", dial_net_ap_ssid());
+    dial_net_bringup();
+    ESP_LOGI(TAG, "Wi-Fi ready");
 
     ESP_LOGI(TAG, "Display LVGL demos");
     // Lock the mutex due to the LVGL APIs are not thread-safe
