@@ -30,7 +30,7 @@ static lv_obj_t *s_num_box, *s_temp_lbl;
 static lv_obj_t *s_unit_lbl;
 static lv_obj_t *s_pill, *s_pill_glyph, *s_pill_word;
 static lv_obj_t *s_power_btn, *s_power_glyph;
-static lv_obj_t *s_dot_a, *s_dot_b, *s_dot_tonight;
+static lv_obj_t *s_dot_a, *s_dot_b, *s_dot_menu;
 static lv_obj_t *s_away_lbl;
 static lv_point_t s_dash_pts[2];
 
@@ -300,12 +300,12 @@ static void apply_palette_and_state(const app_state_t *st)
         lv_obj_set_style_opa(s_stale_dot, stale_target, 0);
     }
 
-    // Page dots (3 now: Dial(A) - Dial(B) - Tonight, design-spec.md §4 #13
-    // extended by M5) — filled = the face this screen instance is showing;
-    // scr_dial is never the Tonight face, so that dot always tracks.
+    // Page dots (3: Dial(A) - Dial(B) - Menu, design-spec.md §4 #13) —
+    // filled = the face this screen instance is showing; scr_dial is never
+    // the menu face, so that dot always tracks.
     lv_obj_set_style_bg_color(s_dot_a, s_zone == ZONE_A ? pal->ink_secondary : pal->track, 0);
     lv_obj_set_style_bg_color(s_dot_b, s_zone == ZONE_B ? pal->ink_secondary : pal->track, 0);
-    lv_obj_set_style_bg_color(s_dot_tonight, pal->track, 0);
+    lv_obj_set_style_bg_color(s_dot_menu, pal->track, 0);
 
     // Away badge (design-spec.md §7 extension) — session-optimistic, tiny.
     lv_obj_set_style_text_color(s_away_lbl, pal->ink_secondary, 0);
@@ -521,7 +521,7 @@ static void create(lv_obj_t *scr, void *arg)
     // the whole time or fade_in would animate an object LVGL still skips.
     lv_obj_set_style_opa(s_stale_dot, LV_OPA_TRANSP, 0);
 
-    // #13 Page dots — 3 now (Dial(A) - Dial(B) - Tonight, M5), evenly spaced
+    // #13 Page dots — 3 (Dial(A) - Dial(B) - Menu), evenly spaced
     // 16px apart around the same centered slot the original 2-dot pair used.
     s_dot_a = lv_obj_create(scr);
     lv_obj_set_size(s_dot_a, 6, 6);
@@ -537,12 +537,12 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_clear_flag(s_dot_b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(s_dot_b, LV_ALIGN_CENTER, 180 - CX, 340 - CY);
 
-    s_dot_tonight = lv_obj_create(scr);
-    lv_obj_set_size(s_dot_tonight, 6, 6);
-    lv_obj_set_style_radius(s_dot_tonight, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(s_dot_tonight, 0, 0);
-    lv_obj_clear_flag(s_dot_tonight, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(s_dot_tonight, LV_ALIGN_CENTER, 196 - CX, 340 - CY);
+    s_dot_menu = lv_obj_create(scr);
+    lv_obj_set_size(s_dot_menu, 6, 6);
+    lv_obj_set_style_radius(s_dot_menu, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_dot_menu, 0, 0);
+    lv_obj_clear_flag(s_dot_menu, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_dot_menu, LV_ALIGN_CENTER, 196 - CX, 340 - CY);
 
     // Away badge — tiny, hidden unless st->away (design-spec.md §7 extension).
     s_away_lbl = lv_label_create(scr);
@@ -568,7 +568,7 @@ static void destroy(void)
     s_num_box = s_temp_lbl = s_unit_lbl = NULL;
     s_pill = s_pill_glyph = s_pill_word = NULL;
     s_power_btn = s_power_glyph = NULL;
-    s_dot_a = s_dot_b = s_dot_tonight = NULL;
+    s_dot_a = s_dot_b = s_dot_menu = NULL;
     s_away_lbl = NULL;
     s_chevron_active = false;
     s_stale_shown = false;
@@ -639,10 +639,10 @@ static bool on_knob(int detents)
     return true;
 }
 
-// Face order (M5): Dial(A) <-left- Dial(B) <-left- Tonight; RIGHT walks the
-// chain back the other way. Quick-actions opens via long-press, not a swipe
-// on the dial itself (see screen_long_press_cb) — up/down are simply
-// unhandled here now that the router forwards all four directions.
+// Face order: Dial(A) <-left- Dial(B) <-left- Menu; RIGHT walks the chain
+// back the other way. Quick-actions opens via long-press, not a swipe on the
+// dial itself (see screen_long_press_cb) — up/down are simply unhandled here
+// now that the router forwards all four directions.
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return false;
@@ -655,10 +655,9 @@ static bool on_gesture(lv_dir_t dir)
             dial_state_set_ui_zone(ZONE_B);
             ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_B, LV_SCR_LOAD_ANIM_MOVE_LEFT);
         } else {
-            // End of the dial chain — Tonight is a step further left, and it
-            // always shows ZONE_A's schedule regardless of which side you
-            // swiped in from (see scr_tonight.c), so no zone arg is needed.
-            ui_router_go(SCR_TONIGHT, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
+            // End of the dial chain — the menu face is a step further left
+            // (Tonight/Settings/Wi-Fi/About all live behind it now).
+            ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
         }
         return true;
     }

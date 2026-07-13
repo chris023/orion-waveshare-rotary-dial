@@ -54,8 +54,20 @@ static void gesture_cb(lv_event_t *e)
     lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
     if (dir == LV_DIR_NONE) return;
     const ui_screen_t *scr = (s_current < SCR_COUNT) ? s_screens[s_current] : NULL;
-    if (scr && scr->on_gesture && scr->on_gesture(dir))
+    if (scr && scr->on_gesture && scr->on_gesture(dir)) {
         dial_state_stamp_input();
+        // A consumed swipe is never also a tap. LVGL 8.4 still delivers
+        // LV_EVENT_CLICKED on release to the object the touch STARTED on,
+        // even after a gesture — and after a navigating swipe that object
+        // is a widget of the outgoing screen, kept alive until the load
+        // animation finishes, so its CLICKED would fire a second
+        // navigation/action on finger-lift (e.g. the menu row a swipe-right
+        // began on hijacking the exit back to the dial). Eat the rest of
+        // the touch. Unconsumed gestures are left alone: a brisk drag along
+        // the side of scr_dial's arc can read as a vertical gesture, and
+        // eating that touch would drop the drag's LV_EVENT_RELEASED commit.
+        lv_indev_wait_release(lv_indev_get_act());
+    }
 }
 
 // Re-entering the current screen with a DIFFERENT arg rebuilds it (the dial

@@ -141,16 +141,20 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
             // no-op in ui_router_go (same id + same arg), so this is safe
             // every tick.
             screen_id_t cur = ui_router_current();
-            // SCR_TONIGHT (M5) is reached by swipe and joins the sticky set
-            // below, but unlike QUICK/BOOST/SETTINGS (which only leave via a
-            // deliberate user action) it's also dismissed by the standby idle
-            // timeout — so that check must win over stickiness here, checked
-            // BEFORE folding TONIGHT into the sticky-set return.
-            if (cur == SCR_TONIGHT && dial_power_level() == DPWR_STANDBY) {
+            // The menu face and its passive sub-screens (TONIGHT/WIFI/ABOUT)
+            // are reached by swipe/tap and join the sticky set below, but
+            // unlike QUICK/BOOST/SETTINGS (which only leave via a deliberate
+            // user action) they're also dismissed by the standby idle
+            // timeout — someone can swipe there and fall asleep on it — so
+            // that check must win over stickiness, checked BEFORE folding
+            // them into the sticky-set return.
+            bool passive = cur == SCR_MENU || cur == SCR_TONIGHT ||
+                           cur == SCR_WIFI || cur == SCR_ABOUT;
+            if (passive && dial_power_level() == DPWR_STANDBY) {
                 *arg = (void *)(uintptr_t)st->ui_zone;
                 return SCR_STANDBY;
             }
-            if (cur == SCR_QUICK || cur == SCR_BOOST || cur == SCR_SETTINGS || cur == SCR_TONIGHT) return cur;
+            if (passive || cur == SCR_QUICK || cur == SCR_BOOST || cur == SCR_SETTINGS) return cur;
             // First link on a fresh device: pick a default side before
             // showing the dial (SCR_SIDEPICK). The `cur` half of this OR
             // also pins the screen when Settings' "My side" row reuses it on

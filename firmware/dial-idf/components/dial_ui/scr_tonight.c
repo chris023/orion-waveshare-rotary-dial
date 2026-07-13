@@ -1,9 +1,8 @@
 /*
- * SCR_TONIGHT — tonight's sleep-schedule face (M5). Reached by swiping left
- * from Dial(B) (scr_dial.c's on_gesture; face order Dial(A) <-left- Dial(B)
- * <-left- Tonight), dismissed by swiping right (back to Dial(B)) or the
- * standby idle timeout (main.c's nav_policy checks that before folding this
- * screen into the sticky set — see the comment there).
+ * SCR_TONIGHT — tonight's sleep-schedule sub-screen (M5). Reached from the
+ * menu face (scr_menu.c's "Tonight" row), dismissed by swiping right (back
+ * to the menu) or the standby idle timeout (main.c's nav_policy checks that
+ * before folding this screen into the sticky set — see the comment there).
  *
  * Always shows ZONE_A's schedule regardless of which dial side you arrived
  * from: the Orion override call has no way to target a specific user, so
@@ -35,7 +34,6 @@ static lv_obj_t *s_wake_lbl, *s_wake_cap_lbl;
 static lv_obj_t *s_no_sched_lbl;
 static lv_obj_t *s_chip, *s_chip_lbl;
 static lv_obj_t *s_pick_num_box, *s_pick_num_lbl;
-static lv_obj_t *s_dot_a, *s_dot_b, *s_dot_tonight;
 
 // Wake-time picker mode state. s_picker_base_min is ZONE_A's current wakeup
 // (minutes-from-midnight) captured at entry; the knob adjusts an offset from
@@ -201,11 +199,6 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_arc_color(s_ring, pal->track, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_title_lbl, pal->ink_secondary, 0);
     lv_obj_set_style_text_color(s_pick_num_lbl, pal->ink_primary, 0);
-
-    // Page dots — Tonight's own dot is always the filled one on this screen.
-    lv_obj_set_style_bg_color(s_dot_a, pal->track, 0);
-    lv_obj_set_style_bg_color(s_dot_b, pal->track, 0);
-    lv_obj_set_style_bg_color(s_dot_tonight, pal->ink_secondary, 0);
 
     // While picking, leave the normal-mode blocks exactly as
     // enter_picker_mode_cb left them (hidden) — a schedule refresh or
@@ -374,29 +367,6 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_transform_pivot_x(s_pick_num_lbl, LV_PCT(50), 0);
     lv_obj_set_style_transform_pivot_y(s_pick_num_lbl, LV_PCT(50), 0);
     lv_obj_center(s_pick_num_lbl);
-
-    // Page dots (3): Dial(A) - Dial(B) - Tonight (design-spec.md §4 #13
-    // extended by M5) — Tonight's own dot is always the filled one here.
-    s_dot_a = lv_obj_create(scr);
-    lv_obj_set_size(s_dot_a, 6, 6);
-    lv_obj_set_style_radius(s_dot_a, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(s_dot_a, 0, 0);
-    lv_obj_clear_flag(s_dot_a, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(s_dot_a, LV_ALIGN_CENTER, 164 - CX, 340 - CY);
-
-    s_dot_b = lv_obj_create(scr);
-    lv_obj_set_size(s_dot_b, 6, 6);
-    lv_obj_set_style_radius(s_dot_b, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(s_dot_b, 0, 0);
-    lv_obj_clear_flag(s_dot_b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(s_dot_b, LV_ALIGN_CENTER, 180 - CX, 340 - CY);
-
-    s_dot_tonight = lv_obj_create(scr);
-    lv_obj_set_size(s_dot_tonight, 6, 6);
-    lv_obj_set_style_radius(s_dot_tonight, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(s_dot_tonight, 0, 0);
-    lv_obj_clear_flag(s_dot_tonight, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(s_dot_tonight, LV_ALIGN_CENTER, 196 - CX, 340 - CY);
 }
 
 static void destroy(void)
@@ -411,7 +381,6 @@ static void destroy(void)
     s_no_sched_lbl = NULL;
     s_chip = s_chip_lbl = NULL;
     s_pick_num_box = s_pick_num_lbl = NULL;
-    s_dot_a = s_dot_b = s_dot_tonight = NULL;
     s_picker_mode = false;
     s_suppress_click = false;
 }
@@ -458,9 +427,7 @@ static bool on_gesture(lv_dir_t dir)
         return true;
     }
     if (dir != LV_DIR_RIGHT) return false;
-    // Tonight always follows from Dial(B) in the face chain (scr_dial.c) —
-    // ui_zone is already ZONE_B from that swipe, nothing to re-commit here.
-    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_B, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
     return true;
 }
 

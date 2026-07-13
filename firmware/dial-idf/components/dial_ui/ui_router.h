@@ -20,14 +20,17 @@ typedef enum {
     SCR_WIFI_PORTAL,      // SoftAP join instructions + QR
     SCR_OAUTH_QR,         // Orion link QR
     SCR_DIAL,             // the temperature dial (arg: zone_idx_t)
-    SCR_TONIGHT,          // tonight's schedule face (M5, arg: unused/NULL — always ZONE_A's schedule)
+    SCR_MENU,             // vertical menu, third face of the swipe chain (arg: unused/NULL)
+    SCR_TONIGHT,          // tonight's schedule sub-screen (M5, arg: unused/NULL — always ZONE_A's schedule)
     SCR_STANDBY,          // always-on clock face (arg: zone_idx_t to wake to)
     SCR_QUICK,            // quick-actions bottom sheet (arg: zone_idx_t it was opened from)
     SCR_BOOST,            // boost duration picker (arg: (zone_idx_t<<1)|heat)
     SCR_ERROR,            // offline / degraded, with retry countdown
     SCR_WELCOME,          // fresh-device onboarding splash (M4)
     SCR_SIDEPICK,         // "which side of the bed?" (M4, reused from Settings)
-    SCR_SETTINGS,         // settings list (M4, arg: zone_idx_t to return to)
+    SCR_SETTINGS,         // settings list (M4, arg: unused/NULL — returns to SCR_MENU)
+    SCR_WIFI,             // Wi-Fi status + change-network (arg: unused/NULL)
+    SCR_ABOUT,            // versions, serial, software update (arg: unused/NULL)
     SCR_COUNT,
 } screen_id_t;
 
