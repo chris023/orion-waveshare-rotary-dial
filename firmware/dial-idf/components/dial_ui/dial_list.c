@@ -8,21 +8,36 @@
  * Opacity uses the plain `opa` style: v8.4's draw-descriptor init resolves
  * it RECURSIVELY up the parent chain (lv_obj_get_style_opa_recursive), so
  * fading the row object alone fades its child labels with it.
+ *
+ * The knob tracks focus by COMMANDED index, not by reading the live scroll
+ * offset: LVGL's scroll animation is a 200-400ms ease-out, so deriving the
+ * current row from scroll_y mid-flight rounds to the OLD row for the first
+ * ~100ms and silently eats detents during a brisk spin. The commanded index
+ * lives in a per-list context and is invalidated whenever a scroll WE didn't
+ * command begins (i.e. a finger drag) — after that the next detent re-bases
+ * off the settled scroll position.
  */
 #include "dial_list.h"
 
-// Zoom/fade curve, in distance-from-center d (px of the row center from the
-// viewport center). Full size at center; ~66% and dimmed at one screen
-// radius out. 152 = the rest distance of the second neighbor for 76px rows —
-// beyond that everything is already off-panel anyway.
-#define ROTOR_RANGE   152
+// Zoom/fade floors at the second neighbor's rest distance (2 * row_h — the
+// falloff must scale with the row pitch or the 72px menu rows and 76px
+// settings rows would get visibly different edge treatments).
 #define ZOOM_FULL     256
 #define ZOOM_MIN      168
 #define OPA_FULL      255
 #define OPA_MIN       100
 
+typedef struct {
+    lv_coord_t row_h;
+    int        target;        // knob-commanded focus index, -1 = not owning
+    bool       self_scroll;   // guards SCROLL_BEGIN fired by our own scroll_to
+} rotor_ctx_t;
+
 static void rotor_update(lv_obj_t *list)
 {
+    const rotor_ctx_t *ctx = lv_obj_get_user_data(list);
+    lv_coord_t range = 2 * ctx->row_h;
+
     lv_area_t la;
     lv_obj_get_coords(list, &la);
     lv_coord_t mid = (la.y1 + la.y2) / 2;
@@ -34,13 +49,13 @@ static void rotor_update(lv_obj_t *list)
         lv_obj_get_coords(row, &ra);
         lv_coord_t d = (ra.y1 + ra.y2) / 2 - mid;
         if (d < 0) d = -d;
-        if (d > ROTOR_RANGE) d = ROTOR_RANGE;
+        if (d > range) d = range;
 
         // Quadratic ease: neighbors stay near full size, the falloff lands
         // on the far rows — reads as curvature rather than a linear taper.
-        int32_t q = ((int32_t)d * d) / ROTOR_RANGE;   // 0..ROTOR_RANGE
-        lv_coord_t zoom = ZOOM_FULL - (ZOOM_FULL - ZOOM_MIN) * q / ROTOR_RANGE;
-        lv_opa_t   opa  = OPA_FULL - (OPA_FULL - OPA_MIN) * d / ROTOR_RANGE;
+        int32_t q = ((int32_t)d * d) / range;   // 0..range
+        lv_coord_t zoom = ZOOM_FULL - (ZOOM_FULL - ZOOM_MIN) * q / range;
+        lv_opa_t   opa  = OPA_FULL - (OPA_FULL - OPA_MIN) * d / range;
 
         lv_obj_set_style_transform_pivot_x(row, LV_PCT(50), 0);
         lv_obj_set_style_transform_pivot_y(row, LV_PCT(50), 0);
@@ -52,6 +67,20 @@ static void rotor_update(lv_obj_t *list)
 static void scroll_cb(lv_event_t *e)
 {
     rotor_update(lv_event_get_target(e));
+}
+
+// Any scroll we didn't start ourselves (a finger drag, elastic snap-back)
+// takes ownership of the position away from the knob — the commanded index
+// would otherwise go stale and the next detent would jump back to it.
+static void scroll_begin_cb(lv_event_t *e)
+{
+    rotor_ctx_t *ctx = lv_obj_get_user_data(lv_event_get_target(e));
+    if (!ctx->self_scroll) ctx->target = -1;
+}
+
+static void delete_cb(lv_event_t *e)
+{
+    lv_mem_free(lv_obj_get_user_data(lv_event_get_target(e)));
 }
 
 lv_obj_t *dial_list_create(lv_obj_t *parent, lv_coord_t row_h)
@@ -72,10 +101,17 @@ lv_obj_t *dial_list_create(lv_obj_t *parent, lv_coord_t row_h)
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_snap_y(list, LV_SCROLL_SNAP_CENTER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+
+    rotor_ctx_t *ctx = lv_mem_alloc(sizeof(rotor_ctx_t));
+    LV_ASSERT_MALLOC(ctx);
+    ctx->row_h = row_h;
+    ctx->target = -1;
+    ctx->self_scroll = false;
+    lv_obj_set_user_data(list, ctx);
+
     lv_obj_add_event_cb(list, scroll_cb, LV_EVENT_SCROLL, NULL);
-    // The knob's row math needs the pitch; children can't carry it (their
-    // user_data belongs to the screens' own tap bindings).
-    lv_obj_set_user_data(list, (void *)(uintptr_t)row_h);
+    lv_obj_add_event_cb(list, scroll_begin_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(list, delete_cb, LV_EVENT_DELETE, NULL);
     return list;
 }
 
@@ -85,27 +121,40 @@ void dial_list_settle(lv_obj_t *list)
     rotor_update(list);
 }
 
-bool dial_list_knob(lv_obj_t *list, int detents)
+int dial_list_knob(lv_obj_t *list, int detents)
 {
-    if (!list || detents == 0) return false;
+    if (!list || detents == 0) return 0;
     int n = (int)lv_obj_get_child_cnt(list);
-    if (n == 0) return false;
-    lv_coord_t row_h = (lv_coord_t)(uintptr_t)lv_obj_get_user_data(list);
-    if (row_h <= 0) return false;
+    if (n == 0) return 0;
+    rotor_ctx_t *ctx = lv_obj_get_user_data(list);
 
-    // With pad_top = center - row_h/2, the snap position of row i is simply
-    // scroll_y = i * row_h — so "current focus" is the nearest multiple,
-    // which stays honest even when read mid-animation (repeated detents
-    // accumulate from wherever the scroll currently is, not from a stale
-    // remembered index).
-    int cur = (lv_obj_get_scroll_y(list) + row_h / 2) / row_h;
-    if (cur < 0) cur = 0;
-    if (cur > n - 1) cur = n - 1;
-    int target = cur + detents;
+    // While a finger is actively dragging this list, the touch owns the
+    // position — an absolute scroll_to here would yank the content out from
+    // under the drag, then the next touch frame would keep dragging from
+    // the jumped offset. Swallow the detent without feedback.
+    for (lv_indev_t *ind = lv_indev_get_next(NULL); ind; ind = lv_indev_get_next(ind))
+        if (lv_indev_get_scroll_obj(ind) == list) return 0;
+
+    // Base off the commanded index while the knob owns the motion (detents
+    // must accumulate even when they land mid-animation); otherwise derive
+    // from the settled scroll position: pad_top = center - row_h/2 makes
+    // row i's snap position exactly scroll_y = i * row_h.
+    int base;
+    if (ctx->target >= 0) {
+        base = ctx->target;
+    } else {
+        base = (lv_obj_get_scroll_y(list) + ctx->row_h / 2) / ctx->row_h;
+        if (base < 0) base = 0;
+        if (base > n - 1) base = n - 1;
+    }
+    int target = base + detents;
     if (target < 0) target = 0;
     if (target > n - 1) target = n - 1;
-    if (target == cur) return false;
+    if (target == base) return -1;
 
-    lv_obj_scroll_to_y(list, target * row_h, LV_ANIM_ON);
-    return true;
+    ctx->target = target;
+    ctx->self_scroll = true;   // SCROLL_BEGIN from our own scroll_to must not clear target
+    lv_obj_scroll_to_y(list, target * ctx->row_h, LV_ANIM_ON);
+    ctx->self_scroll = false;
+    return 1;
 }

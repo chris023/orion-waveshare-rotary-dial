@@ -221,7 +221,8 @@ static void on_state(const app_state_t *st)
 static bool on_knob(int detents)
 {
     if (!s_list || detents == 0) return false;
-    dial_haptics_play(dial_list_knob(s_list, detents) ? HAPTIC_TICK : HAPTIC_STOP);
+    int r = dial_list_knob(s_list, detents);
+    if (r) dial_haptics_play(r > 0 ? HAPTIC_TICK : HAPTIC_STOP);
     return true;
 }
 

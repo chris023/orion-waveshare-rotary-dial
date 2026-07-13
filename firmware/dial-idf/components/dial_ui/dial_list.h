@@ -28,6 +28,8 @@ lv_obj_t *dial_list_create(lv_obj_t *parent, lv_coord_t row_h);
 void dial_list_settle(lv_obj_t *list);
 
 // Move the focused row by `detents` (+down/-up), animated onto center.
-// Returns false when already at the end stop (nothing moved) so the caller
-// can voice the range-stop haptic instead of the tick.
-bool dial_list_knob(lv_obj_t *list, int detents);
+// Returns  1 = focus moved (voice the tick haptic),
+//         -1 = already at the end stop (voice the range-stop haptic),
+//          0 = swallowed: a finger drag owns the list right now — no
+//              feedback, the detent simply doesn't apply mid-drag.
+int dial_list_knob(lv_obj_t *list, int detents);
