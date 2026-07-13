@@ -421,20 +421,34 @@ static void portal_stop(void)
 void dial_net_bringup(void)
 {
     char ssid[33], pass[65];
-    bool want_setup = dial_net_setup_requested();
 
-    // 1) Try stored credentials — unless the user asked to change networks, in
-    //    which case go straight to the portal (any creds still in NVS are the
-    //    ones they're trying to get away from).
-    //    Three rounds before falling into the portal otherwise: a router still
-    //    booting after a power blip shouldn't strand the dial in setup mode.
+    // Force the portal only while the setup request is outstanding AND there
+    // are no credentials to try. The two conditions are stored in separate NVS
+    // commits, so a power cut can land between them; deriving the decision from
+    // both (rather than trusting the flag alone) makes every such window
+    // self-healing:
+    //   flag + no creds  -> the request as intended: run the portal.
+    //   flag + creds     -> the portal already saved the network the user just
+    //                       chose and we died before clearing the flag. Those
+    //                       creds ARE the new ones (request_setup erased the old
+    //                       ones first), so connect with them and clear the flag
+    //                       below — never re-run setup on top of a good network.
+    // The worst remaining outcome is a crash mid-request leaving neither, which
+    // just means the change-network tap didn't take; the user taps it again.
+    bool want_setup = dial_net_setup_requested() && !dial_net_have_creds();
+
+    // 1) Try stored credentials. Three rounds before falling into the portal:
+    //    a router that is still booting after a power blip shouldn't strand the
+    //    dial in setup mode.
     if (!want_setup && load_creds(ssid, sizeof(ssid), pass, sizeof(pass))) {
         emit(DIAL_NET_EV_CONNECTING);
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_start());
         for (int round = 0; round < 3; round++) {
-            if (sta_connect(ssid, pass, 20000))
+            if (sta_connect(ssid, pass, 20000)) {
+                setup_request_clear();   // no-op unless we're healing the window above
                 return;
+            }
             ESP_LOGW(TAG, "stored creds attempt %d/3 failed", round + 1);
         }
         ESP_LOGW(TAG, "stored creds failed — starting setup portal");

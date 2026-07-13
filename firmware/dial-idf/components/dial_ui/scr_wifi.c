@@ -33,6 +33,7 @@ static lv_obj_t *s_list;
 static lv_obj_t *s_val_network, *s_val_ip, *s_val_signal;
 static lv_obj_t *s_confirm;                 // confirm-mode container (hidden by default)
 static lv_obj_t *s_confirm_body, *s_confirm_btn, *s_confirm_btn_lbl;
+static lv_obj_t *s_cancel_btn, *s_cancel_btn_lbl;
 static lv_timer_t *s_poll_timer;
 static bool s_confirm_mode;
 
@@ -132,6 +133,18 @@ static void confirm_btn_cb(lv_event_t *e)
     dial_cmd_post(&cmd);
 }
 
+// The way out. The right-swipe cancels too, but this screen's own reason for
+// existing is that a swipe isn't discoverable — leaving the reboot button as
+// the only visible control would push an unsure user straight into it. The
+// tap-twice pattern this view replaced at least timed out on its own; a modal
+// with no visible exit would not.
+static void cancel_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    set_confirm_mode(false);
+}
+
 static void row_back_cb(lv_event_t *e)
 {
     (void)e;
@@ -162,6 +175,8 @@ static void apply_palette(lv_obj_t *scr)
     lv_obj_set_style_bg_color(s_confirm_btn, pal->surface, 0);
     lv_obj_set_style_border_color(s_confirm_btn, pal->track, 0);
     lv_obj_set_style_text_color(s_confirm_btn_lbl, pal->ink_primary, 0);
+    lv_obj_set_style_border_color(s_cancel_btn, pal->track, 0);
+    lv_obj_set_style_text_color(s_cancel_btn_lbl, pal->ink_secondary, 0);
 }
 
 /* ---- vtable ----------------------------------------------------------------*/
@@ -197,22 +212,38 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_text_font(s_confirm_body, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_align(s_confirm_body, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_confirm_body,
-                      "The dial restarts and shows a QR code. Scan it to join the "
-                      "dial's setup network, then pick your new Wi-Fi.");
-    lv_obj_align(s_confirm_body, LV_ALIGN_CENTER, 0, 150 - CY);
+                      "The dial restarts and shows a QR code for joining its setup network.");
+    lv_obj_align(s_confirm_body, LV_ALIGN_CENTER, 0, 126 - CY);
 
     s_confirm_btn = lv_btn_create(s_confirm);
     lv_obj_set_size(s_confirm_btn, 200, 88);   // primary action: >=88px (round-screen DLS)
     lv_obj_set_style_radius(s_confirm_btn, 44, 0);
     lv_obj_set_style_border_width(s_confirm_btn, 1, 0);
     lv_obj_set_style_shadow_width(s_confirm_btn, 0, 0);
-    lv_obj_align(s_confirm_btn, LV_ALIGN_CENTER, 0, 262 - CY);
+    lv_obj_align(s_confirm_btn, LV_ALIGN_CENTER, 0, 210 - CY);
     lv_obj_add_event_cb(s_confirm_btn, confirm_btn_cb, LV_EVENT_CLICKED, NULL);
 
     s_confirm_btn_lbl = lv_label_create(s_confirm_btn);
     lv_obj_set_style_text_font(s_confirm_btn_lbl, &lv_font_montserrat_20, 0);
     lv_label_set_text(s_confirm_btn_lbl, "Continue");
     lv_obj_center(s_confirm_btn_lbl);
+
+    // Cancel sits below Continue as a quieter (transparent) pill: same 200px
+    // width so the pair reads as one stack, and its rounded ends keep it clear
+    // of the bezel at this y-band.
+    s_cancel_btn = lv_btn_create(s_confirm);
+    lv_obj_set_size(s_cancel_btn, 200, 72);
+    lv_obj_set_style_radius(s_cancel_btn, 36, 0);
+    lv_obj_set_style_bg_opa(s_cancel_btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_cancel_btn, 1, 0);
+    lv_obj_set_style_shadow_width(s_cancel_btn, 0, 0);
+    lv_obj_align(s_cancel_btn, LV_ALIGN_CENTER, 0, 302 - CY);
+    lv_obj_add_event_cb(s_cancel_btn, cancel_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    s_cancel_btn_lbl = lv_label_create(s_cancel_btn);
+    lv_obj_set_style_text_font(s_cancel_btn_lbl, &lv_font_montserrat_16, 0);
+    lv_label_set_text(s_cancel_btn_lbl, "Cancel");
+    lv_obj_center(s_cancel_btn_lbl);
 
     // Created AFTER the list so it draws over rows scrolling beneath it.
     s_title_lbl = lv_label_create(scr);
@@ -234,6 +265,7 @@ static void destroy(void)
     s_title_lbl = NULL;
     s_val_network = s_val_ip = s_val_signal = NULL;
     s_confirm = s_confirm_body = s_confirm_btn = s_confirm_btn_lbl = NULL;
+    s_cancel_btn = s_cancel_btn_lbl = NULL;
     s_confirm_mode = false;
 }
 
@@ -257,13 +289,19 @@ static bool on_knob(int detents)
 
 static bool on_gesture(lv_dir_t dir)
 {
-    if (dir != LV_DIR_RIGHT) return false;
-    // Right-swipe is "back one step": out of the confirm view first (so it can
-    // be dismissed the same way it would be entered), only then off the screen.
+    // While the confirm view is up, EVERY direction is consumed, not just the
+    // one that means "cancel". An unconsumed gesture is not swallowed by the
+    // router (ui_router.c only calls lv_indev_wait_release when on_gesture
+    // returns true), and LVGL 8.4 then still delivers CLICKED on release to the
+    // object the touch started on — so a thumb that drifts up/down/left while
+    // pressing Continue would fire the Wi-Fi reset without a deliberate tap.
+    // scr_tonight's picker mode swallows all four directions for exactly this
+    // reason.
     if (s_confirm_mode) {
-        set_confirm_mode(false);
+        if (dir == LV_DIR_RIGHT) set_confirm_mode(false);   // right-swipe = cancel
         return true;
     }
+    if (dir != LV_DIR_RIGHT) return false;
     ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
     return true;
 }
