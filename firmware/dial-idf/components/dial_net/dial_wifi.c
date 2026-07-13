@@ -99,6 +99,41 @@ void dial_net_forget(void)
     nvs_close(h);
 }
 
+// "Change network" (Settings/Wi-Fi): erasing the credentials is NOT enough on
+// its own — the dev seed below would re-inject the compiled-in secrets.h
+// network on the very next boot and the dial would silently rejoin the same
+// Wi-Fi, never reaching the portal. This flag survives the reboot, suppresses
+// the seed, and forces bringup into the portal regardless of what NVS holds.
+// Cleared only once new credentials actually connect.
+void dial_net_request_setup(void)
+{
+    dial_net_forget();
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "setup", 1);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+bool dial_net_setup_requested(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t v = 0;
+    bool set = (nvs_get_u8(h, "setup", &v) == ESP_OK) && v;
+    nvs_close(h);
+    return set;
+}
+
+static void setup_request_clear(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_erase_key(h, "setup");
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 static bool load_creds(char *ssid, size_t ssid_sz, char *pass, size_t pass_sz)
 {
     nvs_handle_t h;
@@ -194,9 +229,13 @@ bool dial_net_ip(char *out, size_t sz)
     return true;
 }
 
-// Seed NVS from a dev secrets value if not already provisioned. Non-placeholder only.
+// Seed NVS from a dev secrets value if not already provisioned. Non-placeholder
+// only, and never when the user has asked for the setup portal (see
+// dial_net_request_setup) — otherwise "Change network" would just rejoin the
+// build's own network.
 void dial_net_seed(const char *ssid, const char *pass)
 {
+    if (dial_net_setup_requested()) return;
     if (ssid && ssid[0] && strcmp(ssid, "your-wifi-ssid") != 0 && !dial_net_have_creds()) {
         ESP_LOGI(TAG, "seeding Wi-Fi creds from dev secrets");
         save_creds(ssid, pass);
@@ -382,11 +421,14 @@ static void portal_stop(void)
 void dial_net_bringup(void)
 {
     char ssid[33], pass[65];
+    bool want_setup = dial_net_setup_requested();
 
-    // 1) Try stored credentials. Three rounds before falling into the portal:
-    //    a router that is still booting after a power blip shouldn't strand the
-    //    dial in setup mode.
-    if (load_creds(ssid, sizeof(ssid), pass, sizeof(pass))) {
+    // 1) Try stored credentials — unless the user asked to change networks, in
+    //    which case go straight to the portal (any creds still in NVS are the
+    //    ones they're trying to get away from).
+    //    Three rounds before falling into the portal otherwise: a router still
+    //    booting after a power blip shouldn't strand the dial in setup mode.
+    if (!want_setup && load_creds(ssid, sizeof(ssid), pass, sizeof(pass))) {
         emit(DIAL_NET_EV_CONNECTING);
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_start());
@@ -412,6 +454,7 @@ void dial_net_bringup(void)
         vTaskDelay(pdMS_TO_TICKS(500));
         if (sta_connect(s_form_ssid, s_form_pass, 20000)) {
             save_creds(s_form_ssid, s_form_pass);
+            setup_request_clear();   // provisioned: stop forcing the portal
             portal_stop();
             esp_wifi_set_mode(WIFI_MODE_STA);
             ESP_LOGI(TAG, "provisioned + connected");

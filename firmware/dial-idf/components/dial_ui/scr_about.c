@@ -92,6 +92,15 @@ static bool confirm_tap(void)
 
 /* ---- row actions ----------------------------------------------------------*/
 
+// Row 0 on every menu sub-screen (see scr_settings.c): the right-swipe still
+// works, but it isn't discoverable on its own.
+static void row_back_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+}
+
 // Software update (M6). Behavior depends on the worker's last-known status:
 //  - CHECKING/DOWNLOADING: tap is a no-op (screen stays navigable, just not
 //    this row) — nothing to confirm or retry mid-flight.
@@ -200,6 +209,8 @@ static void create(lv_obj_t *scr, void *arg)
 
     s_list = dial_list_create(scr, ROW_H);
 
+    make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
+
     lv_obj_t *ota_row = make_row(s_list, "Software update", row_ota_cb, &s_val_ota);
     s_ota_err_lbl = lv_label_create(ota_row);
     lv_obj_set_style_text_font(s_ota_err_lbl, &lv_font_montserrat_12, 0);
@@ -225,7 +236,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 64 - CY);
 
     apply_palette(scr);
-    dial_list_settle(s_list);
+    dial_list_settle(s_list, 1);   // open on "Software update", not on Back
     s_confirm_timer = lv_timer_create(confirm_timer_cb, 250, NULL);
 }
 

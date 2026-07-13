@@ -35,9 +35,19 @@ void dial_net_seed(const char *ssid, const char *pass);
 // True if Wi-Fi credentials are stored in NVS.
 bool dial_net_have_creds(void);
 
-// Settings "Wi-Fi reset": erase the stored SSID/password. The next boot's
-// dial_net_bringup() then finds no creds and runs the captive portal again.
+// Erase the stored SSID/password.
 void dial_net_forget(void);
+
+// "Change network": forget the credentials AND set a persistent flag that
+// (a) suppresses dial_net_seed's dev-secrets injection and (b) forces the next
+// dial_net_bringup() into the captive portal. Erasing creds alone is not
+// enough — the seed would silently restore the build's own network on the next
+// boot. Reboot after calling this; the flag clears once new creds connect.
+void dial_net_request_setup(void);
+
+// True while a dial_net_request_setup() is still outstanding (i.e. the device
+// is on its way to, or sitting in, the setup portal by the user's request).
+bool dial_net_setup_requested(void);
 
 // Connect using stored creds; if none (or connecting fails), run the captive
 // portal until the user submits working credentials. Blocks until connected.

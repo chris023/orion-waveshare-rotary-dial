@@ -1,15 +1,22 @@
 /*
- * SCR_WIFI — Wi-Fi status + change-network sub-screen, reached from the new
- * menu face (SCR_MENU). Read-only network/IP/signal rows plus a single
- * destructive action ("Change network") that forgets the stored credentials
- * so the next boot re-runs the captive portal (dial_net_forget's contract,
- * driven here via CMD_WIFI_RESET so the worker task owns the NVS write —
- * this screen never touches NVS or the Wi-Fi driver itself).
+ * SCR_WIFI — Wi-Fi status + change-network sub-screen, reached from the menu
+ * face (SCR_MENU). Read-only network/IP/signal rows plus "Change network".
  *
  * esp_wifi_sta_get_ap_info() is a documented thread-safe getter: it's a quick
  * IPC into the Wi-Fi driver task for the currently-associated AP's record,
  * not network I/O, so calling it straight from the LVGL task doesn't violate
  * the worker-owns-networking rule the rest of the UI follows.
+ *
+ * "Change network" opens a full-screen CONFIRM MODE rather than the value-
+ * label tap-twice pattern the destructive Settings rows use: at Mont 16 the
+ * "tap again" prompt collided with the Mont 24 row label (owner saw
+ * overlapping text), and this action deserves a sentence of explanation
+ * anyway — it reboots the dial into the SoftAP portal, where scr_setup's QR
+ * gets the phone onto the setup network. The command that gets it there is
+ * CMD_WIFI_RESET -> dial_net_request_setup(), which BOTH forgets the creds and
+ * latches a flag: forgetting alone was not enough, because the dev seed would
+ * re-inject the build's own network on the next boot and the dial would
+ * silently rejoin it (the bug the owner hit — "it just resets the unit").
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
@@ -17,20 +24,17 @@
 #include "esp_wifi.h"
 #include "dial_wifi.h"
 
-#define CY 180   // title's fixed-anchor slot is expressed relative to center
-#define ROW_H          76
-#define CONFIRM_WINDOW_MS 3000
+#define CX 180
+#define CY 180
+#define ROW_H 76
 
 static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
-static lv_obj_t *s_val_network, *s_val_ip, *s_val_signal, *s_val_change;
-
-// Single-row confirm state (scr_settings' confirm_id_t collapses to a bool
-// here — this screen has exactly one confirmable row).
-static bool     s_armed;
-static uint32_t s_armed_at_ms;
-static lv_timer_t *s_confirm_timer;
+static lv_obj_t *s_val_network, *s_val_ip, *s_val_signal;
+static lv_obj_t *s_confirm;                 // confirm-mode container (hidden by default)
+static lv_obj_t *s_confirm_body, *s_confirm_btn, *s_confirm_btn_lbl;
 static lv_timer_t *s_poll_timer;
+static bool s_confirm_mode;
 
 /* ---- row factory (same 76px/label-left/value-right idiom as scr_settings) */
 
@@ -95,45 +99,53 @@ static void refresh_values(void)
 
 static void poll_timer_cb(lv_timer_t *t) { (void)t; refresh_values(); }
 
-/* ---- change-network confirm (tap-twice-within-3s, scr_settings' pattern) */
+/* ---- confirm mode --------------------------------------------------------*/
 
-static void confirm_disarm(void)
+static void set_confirm_mode(bool on)
 {
-    if (s_armed) lv_label_set_text(s_val_change, "");
-    s_armed = false;
-}
-
-// Ticks while armed so the "tap again" prompt reverts on its own if the
-// window lapses without a second tap — same watchdog scr_settings runs.
-static void confirm_timer_cb(lv_timer_t *t)
-{
-    (void)t;
-    if (s_armed && lv_tick_elaps(s_armed_at_ms) >= CONFIRM_WINDOW_MS) confirm_disarm();
+    s_confirm_mode = on;
+    if (on) {
+        lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_confirm, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_title_lbl, "CHANGE WI-FI");
+    } else {
+        lv_obj_clear_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_confirm, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_title_lbl, "WI-FI");
+    }
 }
 
 static void row_change_network_cb(lv_event_t *e)
 {
     (void)e;
-    if (s_armed && lv_tick_elaps(s_armed_at_ms) < CONFIRM_WINDOW_MS) {
-        confirm_disarm();
-        dial_haptics_play(HAPTIC_CONFIRM);
-        app_cmd_t cmd = { .kind = CMD_WIFI_RESET };
-        dial_cmd_post(&cmd);
-        return;
-    }
-    confirm_disarm();
-    s_armed = true;
-    s_armed_at_ms = lv_tick_get();
-    lv_label_set_text(s_val_change, "Tap again to confirm");
+    dial_haptics_play(HAPTIC_TICK);
+    set_confirm_mode(true);
+}
+
+// The only irreversible tap on this screen: reboots into the setup portal.
+static void confirm_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_CONFIRM);
+    lv_label_set_text(s_confirm_btn_lbl, "Restarting...");
+    app_cmd_t cmd = { .kind = CMD_WIFI_RESET };
+    dial_cmd_post(&cmd);
+}
+
+static void row_back_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
 }
 
 /* ---- palette --------------------------------------------------------------*/
 
-static void apply_palette(lv_obj_t *scr, lv_obj_t *title)
+static void apply_palette(lv_obj_t *scr)
 {
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
-    lv_obj_set_style_text_color(title, pal->ink_secondary, 0);
+    lv_obj_set_style_text_color(s_title_lbl, pal->ink_secondary, 0);
 
     uint32_t n = lv_obj_get_child_cnt(s_list);
     for (uint32_t i = 0; i < n; i++) {
@@ -145,6 +157,11 @@ static void apply_palette(lv_obj_t *scr, lv_obj_t *title)
             lv_obj_set_style_text_color(lbl, j == 0 ? pal->ink_primary : pal->ink_secondary, 0);
         }
     }
+
+    lv_obj_set_style_text_color(s_confirm_body, pal->ink_secondary, 0);
+    lv_obj_set_style_bg_color(s_confirm_btn, pal->surface, 0);
+    lv_obj_set_style_border_color(s_confirm_btn, pal->track, 0);
+    lv_obj_set_style_text_color(s_confirm_btn_lbl, pal->ink_primary, 0);
 }
 
 /* ---- vtable ----------------------------------------------------------------*/
@@ -152,16 +169,50 @@ static void apply_palette(lv_obj_t *scr, lv_obj_t *title)
 static void create(lv_obj_t *scr, void *arg)
 {
     (void)arg;
-    s_armed = false;
+    s_confirm_mode = false;
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
     s_list = dial_list_create(scr, ROW_H);
 
+    make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
     make_row(s_list, "Network", NULL, &s_val_network);
     make_row(s_list, "IP",      NULL, &s_val_ip);
     make_row(s_list, "Signal",  NULL, &s_val_signal);
-    make_row(s_list, "Change network", row_change_network_cb, &s_val_change);
+    make_row(s_list, "Change network", row_change_network_cb, NULL);
+
+    // Confirm view: a sibling of the list, shown in its place (not over it).
+    s_confirm = lv_obj_create(scr);
+    lv_obj_set_size(s_confirm, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_opa(s_confirm, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_confirm, 0, 0);
+    lv_obj_clear_flag(s_confirm, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_confirm, LV_OBJ_FLAG_HIDDEN);
+
+    // 240px wide keeps the wrapped text inside the round panel's chord at the
+    // y-band it occupies; centered so no line ends near the bezel.
+    s_confirm_body = lv_label_create(s_confirm);
+    lv_obj_set_width(s_confirm_body, 240);
+    lv_label_set_long_mode(s_confirm_body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_confirm_body, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_align(s_confirm_body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_confirm_body,
+                      "The dial restarts and shows a QR code. Scan it to join the "
+                      "dial's setup network, then pick your new Wi-Fi.");
+    lv_obj_align(s_confirm_body, LV_ALIGN_CENTER, 0, 150 - CY);
+
+    s_confirm_btn = lv_btn_create(s_confirm);
+    lv_obj_set_size(s_confirm_btn, 200, 88);   // primary action: >=88px (round-screen DLS)
+    lv_obj_set_style_radius(s_confirm_btn, 44, 0);
+    lv_obj_set_style_border_width(s_confirm_btn, 1, 0);
+    lv_obj_set_style_shadow_width(s_confirm_btn, 0, 0);
+    lv_obj_align(s_confirm_btn, LV_ALIGN_CENTER, 0, 262 - CY);
+    lv_obj_add_event_cb(s_confirm_btn, confirm_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    s_confirm_btn_lbl = lv_label_create(s_confirm_btn);
+    lv_obj_set_style_text_font(s_confirm_btn_lbl, &lv_font_montserrat_20, 0);
+    lv_label_set_text(s_confirm_btn_lbl, "Continue");
+    lv_obj_center(s_confirm_btn_lbl);
 
     // Created AFTER the list so it draws over rows scrolling beneath it.
     s_title_lbl = lv_label_create(scr);
@@ -169,39 +220,36 @@ static void create(lv_obj_t *scr, void *arg)
     lv_label_set_text(s_title_lbl, "WI-FI");
     lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 64 - CY);
 
-    apply_palette(scr, s_title_lbl);
+    apply_palette(scr);
     refresh_values();
-    dial_list_settle(s_list);
+    dial_list_settle(s_list, 1);   // open on "Network", not on Back
 
-    s_confirm_timer = lv_timer_create(confirm_timer_cb, 250, NULL);
     s_poll_timer = lv_timer_create(poll_timer_cb, 2000, NULL);
 }
 
 static void destroy(void)
 {
-    if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
-    if (s_poll_timer)    { lv_timer_del(s_poll_timer);    s_poll_timer = NULL; }
+    if (s_poll_timer) { lv_timer_del(s_poll_timer); s_poll_timer = NULL; }
     s_list = NULL;
     s_title_lbl = NULL;
-    s_val_network = s_val_ip = s_val_signal = s_val_change = NULL;
-    s_armed = false;
+    s_val_network = s_val_ip = s_val_signal = NULL;
+    s_confirm = s_confirm_body = s_confirm_btn = s_confirm_btn_lbl = NULL;
+    s_confirm_mode = false;
 }
 
 // Nothing here is derived from app_state_t (Wi-Fi status lives in the driver,
 // not the state store) — on_state just re-applies the palette on a day/night
-// flip. The change-network value's "Tap again to confirm" text is never
-// touched by apply_palette (it only sets style colors, not label content),
-// so an armed confirm survives any state commit that lands mid-window.
+// flip.
 static void on_state(const app_state_t *st)
 {
     (void)st;
     if (!s_list) return;
-    apply_palette(lv_obj_get_parent(s_list), s_title_lbl);
+    apply_palette(lv_obj_get_parent(s_list));
 }
 
 static bool on_knob(int detents)
 {
-    if (!s_list || detents == 0) return false;
+    if (!s_list || detents == 0 || s_confirm_mode) return false;
     int r = dial_list_knob(s_list, detents);
     if (r) dial_haptics_play(r > 0 ? HAPTIC_TICK : HAPTIC_STOP);
     return true;
@@ -210,6 +258,12 @@ static bool on_knob(int detents)
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_RIGHT) return false;
+    // Right-swipe is "back one step": out of the confirm view first (so it can
+    // be dismissed the same way it would be entered), only then off the screen.
+    if (s_confirm_mode) {
+        set_confirm_mode(false);
+        return true;
+    }
     ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
     return true;
 }

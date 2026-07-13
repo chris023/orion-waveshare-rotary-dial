@@ -99,6 +99,16 @@ static bool confirm_tap(confirm_id_t id)
 
 /* ---- row actions ---------------------------------------------------------*/
 
+// Row 0 on every menu sub-screen: swiping right still works, but the gesture
+// isn't discoverable on its own (owner feedback), and a row is the one back
+// affordance that can't occlude the list it sits in.
+static void row_back_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+}
+
 static void row_my_side_cb(lv_event_t *e)
 {
     (void)e;
@@ -174,6 +184,7 @@ static void create(lv_obj_t *scr, void *arg)
 
     s_list = dial_list_create(scr, ROW_H);
 
+    make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
     make_row(s_list, "My side",       row_my_side_cb,      &s_val_my_side);
     make_row(s_list, "Units",         row_units_cb,         &s_val_units);
     make_row(s_list, "Haptics",       row_haptics_cb,       &s_val_haptics);
@@ -188,7 +199,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 64 - CY);
 
     apply_palette(scr);
-    dial_list_settle(s_list);
+    dial_list_settle(s_list, 1);   // open on "My side", not on Back
     s_confirm_timer = lv_timer_create(confirm_timer_cb, 250, NULL);
 }
 

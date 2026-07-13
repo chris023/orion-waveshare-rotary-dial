@@ -101,6 +101,13 @@ lv_obj_t *dial_list_create(lv_obj_t *parent, lv_coord_t row_h)
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_snap_y(list, LV_SCROLL_SNAP_CENTER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+    // A rotor is a picker, not a scroll view. SCROLL_ONE clamps a drag to the
+    // neighbouring snap points, so one flick advances exactly one row; without
+    // it (and with momentum on) a normal flick threw the list past the row the
+    // user was reaching for and landed on the end of the list. ELASTIC off
+    // kills the rubber-band overshoot at the ends for the same reason.
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLL_ONE);
+    lv_obj_clear_flag(list, LV_OBJ_FLAG_SCROLL_MOMENTUM | LV_OBJ_FLAG_SCROLL_ELASTIC);
 
     rotor_ctx_t *ctx = lv_mem_alloc(sizeof(rotor_ctx_t));
     LV_ASSERT_MALLOC(ctx);
@@ -115,9 +122,21 @@ lv_obj_t *dial_list_create(lv_obj_t *parent, lv_coord_t row_h)
     return list;
 }
 
-void dial_list_settle(lv_obj_t *list)
+void dial_list_settle(lv_obj_t *list, int focus_idx)
 {
-    lv_obj_update_layout(list);
+    lv_obj_update_layout(list);   // rows have no coords until the layout runs
+
+    rotor_ctx_t *ctx = lv_obj_get_user_data(list);
+    int n = (int)lv_obj_get_child_cnt(list);
+    if (focus_idx > 0 && n > 0) {
+        if (focus_idx > n - 1) focus_idx = n - 1;
+        // Screens whose row 0 is the Back row open on row 1: the back door
+        // shouldn't be the item under the user's thumb on arrival.
+        ctx->target = focus_idx;
+        ctx->self_scroll = true;
+        lv_obj_scroll_to_y(list, focus_idx * ctx->row_h, LV_ANIM_OFF);
+        ctx->self_scroll = false;
+    }
     rotor_update(list);
 }
 

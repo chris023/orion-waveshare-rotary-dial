@@ -33,6 +33,7 @@ static lv_obj_t *s_bedtime_lbl, *s_bedtime_cap_lbl;
 static lv_obj_t *s_wake_lbl, *s_wake_cap_lbl;
 static lv_obj_t *s_no_sched_lbl;
 static lv_obj_t *s_chip, *s_chip_lbl;
+static lv_obj_t *s_back, *s_back_lbl;
 static lv_obj_t *s_pick_num_box, *s_pick_num_lbl;
 
 // Wake-time picker mode state. s_picker_base_min is ZONE_A's current wakeup
@@ -166,6 +167,7 @@ static void enter_picker_mode_cb(lv_event_t *e)
     dial_haptics_play(HAPTIC_TICK);   // settle cue, matches scr_dial's mode-switch long-press
     lv_label_set_text(s_title_lbl, "SET WAKE");
     lv_obj_add_flag(s_no_sched_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_back, LV_OBJ_FLAG_HIDDEN);   // a tap belongs to the picker while editing
     set_normal_blocks_hidden(true);
     lv_obj_clear_flag(s_pick_num_box, LV_OBJ_FLAG_HIDDEN);
     render_picker_numeral();
@@ -199,6 +201,9 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_arc_color(s_ring, pal->track, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_title_lbl, pal->ink_secondary, 0);
     lv_obj_set_style_text_color(s_pick_num_lbl, pal->ink_primary, 0);
+    lv_obj_set_style_bg_color(s_back, pal->surface, 0);
+    lv_obj_set_style_border_color(s_back, pal->track, 0);
+    lv_obj_set_style_text_color(s_back_lbl, pal->ink_secondary, 0);
 
     // While picking, leave the normal-mode blocks exactly as
     // enter_picker_mode_cb left them (hidden) — a schedule refresh or
@@ -211,6 +216,10 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_text_color(s_wake_lbl, pal->ink_primary, 0);
     lv_obj_set_style_text_color(s_wake_cap_lbl, pal->ink_secondary, 0);
     lv_obj_set_style_text_color(s_no_sched_lbl, pal->ink_secondary, 0);
+
+    // Back stays reachable in every non-picker state — including "No schedule",
+    // which hides the normal blocks below.
+    lv_obj_clear_flag(s_back, LV_OBJ_FLAG_HIDDEN);
 
     // Overridden chip: warning color by day, stale (dim) at night — same
     // hue->value substitution the rest of the palette uses at night.
@@ -270,6 +279,17 @@ static void chip_event_cb(lv_event_t *e)
     dial_haptics_play(HAPTIC_CONFIRM);
     app_cmd_t cmd = { .kind = CMD_TONIGHT_REVERT, .zone = ZONE_A };
     dial_cmd_post(&cmd);
+}
+
+// The right-swipe back to the menu still works; this is the visible affordance
+// for it (owner feedback: the gesture alone wasn't discoverable). The list
+// sub-screens carry the same thing as row 0 of their rotor instead — here
+// there's no list to sit in, and nothing below the chip to occlude.
+static void back_event_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
 }
 
 /* ---- vtable ----------------------------------------------------------------*/
@@ -351,6 +371,22 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_text_font(s_chip_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(s_chip_lbl, "OVERRIDDEN");
 
+    // Back pill: 140x72 (>=72px target) centered at y=310 — a rounded pill
+    // that size keeps every edge inside the round panel down there, and it
+    // clears the chip above it.
+    s_back = lv_btn_create(scr);
+    lv_obj_set_size(s_back, 140, 72);
+    lv_obj_set_style_radius(s_back, 36, 0);
+    lv_obj_set_style_border_width(s_back, 1, 0);
+    lv_obj_set_style_shadow_width(s_back, 0, 0);
+    lv_obj_align(s_back, LV_ALIGN_CENTER, 0, 310 - CY);
+    lv_obj_add_event_cb(s_back, back_event_cb, LV_EVENT_CLICKED, NULL);
+
+    s_back_lbl = lv_label_create(s_back);
+    lv_obj_set_style_text_font(s_back_lbl, &lv_font_montserrat_16, 0);
+    lv_label_set_text(s_back_lbl, LV_SYMBOL_LEFT "  Back");
+    lv_obj_center(s_back_lbl);
+
     // Picker-mode numeral (candidate wake time, Mont 48) — same fixed-anchor
     // slot as scr_dial/scr_boost's numeral; hidden outside picker mode.
     s_pick_num_box = lv_obj_create(scr);
@@ -380,6 +416,7 @@ static void destroy(void)
     s_wake_lbl = s_wake_cap_lbl = NULL;
     s_no_sched_lbl = NULL;
     s_chip = s_chip_lbl = NULL;
+    s_back = s_back_lbl = NULL;
     s_pick_num_box = s_pick_num_lbl = NULL;
     s_picker_mode = false;
     s_suppress_click = false;

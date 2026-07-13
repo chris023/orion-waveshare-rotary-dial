@@ -840,8 +840,8 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         esp_restart();
         break;
     case CMD_WIFI_RESET:
-        ESP_LOGW(TAG, "settings: Wi-Fi reset requested — clearing credentials");
-        dial_net_forget();
+        ESP_LOGW(TAG, "settings: change-network requested — rebooting into the setup portal");
+        dial_net_request_setup();
         esp_restart();
         break;
     case CMD_FACTORY_RESET:
@@ -1161,8 +1161,11 @@ void app_main(void)
     dial_net_init();
     // Onboarding (M4): "fresh" means no Wi-Fi creds were ever stored — read
     // BEFORE dial_net_seed()'s dev convenience below can inject any, so a
-    // fresh-flashed dev build still exercises the real onboarding flow.
-    bool fresh = !dial_net_have_creds();
+    // fresh-flashed dev build still exercises the real onboarding flow. A
+    // user-requested network change also leaves NVS credential-less, but that
+    // device is NOT fresh (it keeps its tokens, side, and prefs) — it should
+    // land straight on the portal QR, not replay the welcome splash.
+    bool fresh = !dial_net_have_creds() && !dial_net_setup_requested();
     dial_state_commit(mut_fresh_device, &fresh);
     dial_state_restore_prefs();   // last shown side (needs NVS, hence after net init)
     dial_net_seed(WIFI_SSID, WIFI_PASSWORD);

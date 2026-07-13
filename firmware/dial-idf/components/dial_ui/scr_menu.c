@@ -38,6 +38,15 @@ static void row_event_cb(lv_event_t *e)
 {
     dial_haptics_play(HAPTIC_TICK);
     screen_id_t dest = (screen_id_t)(uintptr_t)lv_event_get_user_data(e);
+    // The Back row is the one destination that moves BACKWARD along the chain
+    // (to the dial the menu was swiped in from), so it gets the reverse
+    // transition and the zone arg the dial needs; every other row descends
+    // into a sub-screen. Keeping it a row (rather than floating chrome) means
+    // it never occludes the list and the knob can reach it like anything else.
+    if (dest == SCR_DIAL) {
+        ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_B, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+        return;
+    }
     ui_router_go(dest, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
 }
 
@@ -115,6 +124,7 @@ static void create(lv_obj_t *scr, void *arg)
 
     s_list = dial_list_create(scr, ROW_H);
 
+    make_row(s_list, LV_SYMBOL_LEFT "  Back", SCR_DIAL);
     make_row(s_list, "Tonight",  SCR_TONIGHT);
     make_row(s_list, "Settings", SCR_SETTINGS);
     make_row(s_list, "Wi-Fi",    SCR_WIFI);
@@ -142,7 +152,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_dot_menu, LV_ALIGN_CENTER, 196 - CX, 340 - CY);
 
     apply_palette();
-    dial_list_settle(s_list);
+    dial_list_settle(s_list, 1);   // open on "Tonight", not on Back
 }
 
 static void destroy(void)

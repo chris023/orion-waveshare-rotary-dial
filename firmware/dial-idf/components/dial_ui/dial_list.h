@@ -22,10 +22,12 @@
 // both the padding and the knob's row math).
 lv_obj_t *dial_list_create(lv_obj_t *parent, lv_coord_t row_h);
 
-// Run layout and apply the initial zoom/fade pass. Call once after the rows
-// are appended (creation happens before LVGL lays the screen out, so the
-// transform pass can't run off real coordinates until forced here).
-void dial_list_settle(lv_obj_t *list);
+// Run layout, center row `focus_idx` (0 = leave at the top), and apply the
+// initial zoom/fade pass. Call once after the rows are appended (creation
+// happens before LVGL lays the screen out, so the transform pass can't run off
+// real coordinates until forced here). Screens whose row 0 is a Back row pass
+// focus_idx = 1 so they don't open with the exit under the user's thumb.
+void dial_list_settle(lv_obj_t *list, int focus_idx);
 
 // Move the focused row by `detents` (+down/-up), animated onto center.
 // Returns  1 = focus moved (voice the tick haptic),
