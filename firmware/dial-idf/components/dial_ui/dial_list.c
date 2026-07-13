@@ -101,12 +101,13 @@ lv_obj_t *dial_list_create(lv_obj_t *parent, lv_coord_t row_h)
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_snap_y(list, LV_SCROLL_SNAP_CENTER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
-    // A rotor is a picker, not a scroll view. SCROLL_ONE clamps a drag to the
-    // neighbouring snap points, so one flick advances exactly one row; without
-    // it (and with momentum on) a normal flick threw the list past the row the
-    // user was reaching for and landed on the end of the list. ELASTIC off
-    // kills the rubber-band overshoot at the ends for the same reason.
-    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLL_ONE);
+    // Momentum is what made the list overshoot: a flick used to be "thrown"
+    // and coast past the row the user was reaching for, landing at the end of
+    // the list. With MOMENTUM off the content tracks the finger and stops
+    // where it's released (then snaps to the nearest row), so a drag can cross
+    // as many rows as it physically travels — SCROLL_ONE would clamp that to a
+    // single row per swipe, which reads as sluggish (owner feedback). ELASTIC
+    // off kills the rubber-band overshoot at the two ends.
     lv_obj_clear_flag(list, LV_OBJ_FLAG_SCROLL_MOMENTUM | LV_OBJ_FLAG_SCROLL_ELASTIC);
 
     rotor_ctx_t *ctx = lv_mem_alloc(sizeof(rotor_ctx_t));
