@@ -977,6 +977,31 @@ static void worker_task(void *arg)
     char client_id[96];
     int backoff_s = BACKOFF_MIN_S;
 
+    /*
+     * Input comes up FIRST, before the network.
+     *
+     * These used to be initialised after Wi-Fi, OAuth, the MCP connect and the
+     * first poll had all succeeded — which meant that during Wi-Fi setup the
+     * encoder callbacks did not exist yet and the knob was simply dead. That
+     * was survivable when setup was "scan a QR with your phone", and fatal the
+     * moment the dial started asking you to TYPE A PASSWORD with the knob.
+     *
+     * Nothing here needs the network: the display, touch and I2C bus are all up
+     * (app_main did them), and iot_knob only needs its two GPIOs. Haptics is
+     * safe to call before this runs — dial_haptics_play() no-ops until the
+     * driver is present — so the ordering was never load-bearing, just late.
+     */
+    knob_init();
+    dial_haptics_init();
+    {
+        // Apply the persisted haptics preference (restored into the store at
+        // boot) — the driver defaults to enabled and settings only writes on
+        // taps, so without this an "Off" preference reverts every reboot.
+        app_state_t st;
+        dial_state_get(&st);
+        dial_haptics_set_enabled(st.haptics_enabled);
+    }
+
     // ---- Wi-Fi (blocking bringup; portal phase published via events) ----
     dial_state_set_phase(PH_WIFI_CONNECTING, NULL);
     dial_net_bringup();
@@ -1062,16 +1087,6 @@ static void worker_task(void *arg)
     // poll in the steady-state loop below, in case this exact poll hit a
     // transient failure -- ota_confirm_once() only ever does real work once.)
     if (first_poll_ok) ota_confirm_once();
-    knob_init();          // safe now: full board init done, router running
-    dial_haptics_init();  // I2C bus is quiet by now; cal runs once, then NVS
-    {
-        // Apply the persisted haptics preference (restored into the store at
-        // boot) — the driver defaults to enabled and settings only writes on
-        // taps, so without this an "Off" preference reverts every reboot.
-        app_state_t st;
-        dial_state_get(&st);
-        dial_haptics_set_enabled(st.haptics_enabled);
-    }
 
     // ---- steady state: drain commands (coalescing per zone), gated poll ----
     int64_t last_poll_us      = esp_timer_get_time();
