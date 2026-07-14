@@ -19,6 +19,7 @@ typedef enum {
     DIAL_NET_EV_PORTAL,       // captive portal is up, waiting for creds
     DIAL_NET_EV_GOT_IP,       // connected (also fires on every reconnect)
     DIAL_NET_EV_LOST,         // established connection dropped; auto-retrying
+    DIAL_NET_EV_SETUP_FAILED,  // the credentials just submitted did not connect
 } dial_net_event_t;
 typedef void (*dial_net_event_cb_t)(dial_net_event_t ev);
 

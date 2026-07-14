@@ -44,7 +44,19 @@ static void on_state(const app_state_t *st)
 
     switch (st->phase) {
     case PH_BOOT:              main_txt = "Starting up..."; break;
-    case PH_WIFI_CONNECTING:   main_txt = "Connecting to Wi-Fi..."; break;
+    // PH_WIFI_PORTAL lands here only in the beat between the dial handing over
+    // credentials and the provisioning task picking them up — the instructions
+    // screen owns that phase otherwise. It used to fall through to the default
+    // "...", which is what the user saw after typing a password: nothing.
+    case PH_WIFI_PORTAL:
+    case PH_WIFI_CONNECTING:
+        main_txt = "Connecting to Wi-Fi...";
+        // Name the network when we know it. Sitting on a bare "..." while the
+        // dial silently tries a password you just typed is the worst possible
+        // moment to say nothing.
+        if (st->wifi_join_ssid[0])
+            snprintf(sub_txt, sizeof(sub_txt), "%s", st->wifi_join_ssid);
+        break;
     case PH_WIFI_LOST:
         main_txt = "Wi-Fi lost";
         snprintf(sub_txt, sizeof(sub_txt), "Reconnecting...");

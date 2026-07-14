@@ -709,7 +709,10 @@ void dial_net_bringup(void)
         // Wrong password, or the network wasn't there. Put the portal back and
         // let them try again: phones re-join an open AP they've just used on
         // their own, and re-show the page with it.
+        // Say so. A rejected password used to just dump the user back at the
+        // start of setup with nothing on screen explaining why.
         ESP_LOGW(TAG, "those creds didn't connect — back to setup");
+        emit(DIAL_NET_EV_SETUP_FAILED);
         if (ap_up()) portal_start();
         emit(DIAL_NET_EV_PORTAL);
     }

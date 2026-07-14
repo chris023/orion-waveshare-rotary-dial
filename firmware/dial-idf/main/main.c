@@ -136,11 +136,20 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
 
     switch (st->phase) {
     case PH_WIFI_PORTAL: {
-        // Setting up on the dial (network list, password entry) is a deliberate
-        // journey inside this phase — a routine state commit must not yank the
-        // user back to the instructions screen halfway through typing.
+        // A password the router rejected sends the user straight back to the
+        // password screen FOR THE SAME NETWORK, which is the only place they can
+        // do anything about it. Landing them at the start of setup — as this
+        // did — makes them re-pick the network to fix a typo.
+        if (st->wifi_join_failed && st->wifi_join_idx >= 0) {
+            *arg = (void *)(uintptr_t)st->wifi_join_idx;
+            return SCR_PASSKEY;
+        }
+        // Setting up on the dial (network list, password entry, and the wait
+        // while it connects) is a deliberate journey inside this phase — a
+        // routine state commit must not yank the user back to the instructions
+        // screen halfway through typing.
         screen_id_t cur = ui_router_current();
-        if (cur == SCR_NETPICK || cur == SCR_PASSKEY) return cur;
+        if (cur == SCR_NETPICK || cur == SCR_PASSKEY || cur == SCR_CONNECTING) return cur;
         return SCR_WIFI_PORTAL;
     }
     case PH_OAUTH_WAIT_CONSENT: return SCR_OAUTH_QR;
@@ -1275,6 +1284,12 @@ static void net_event_cb(dial_net_event_t ev)
     switch (ev) {
     case DIAL_NET_EV_PORTAL:
         dial_state_set_phase(PH_WIFI_PORTAL, NULL);
+        break;
+    case DIAL_NET_EV_SETUP_FAILED:
+        // The credentials just submitted were rejected. nav_policy uses this to
+        // put the user back on the password screen for the same network,
+        // instead of at the start of setup with no idea what happened.
+        dial_state_set_wifi_join_failed();
         break;
     case DIAL_NET_EV_LOST:
         dial_state_get(&st);

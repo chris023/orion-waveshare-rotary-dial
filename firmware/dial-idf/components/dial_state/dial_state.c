@@ -27,6 +27,7 @@ void dial_state_init(void)
     configASSERT(s_mux && s_cmd_q);
     memset(&s_state, 0, sizeof(s_state));
     s_state.phase = PH_BOOT;
+    s_state.wifi_join_idx = -1;   // no on-device join attempted yet
     s_state.haptics_enabled = true;   // matches dial_haptics.c's own default
     for (int z = 0; z < ZONE_COUNT; z++) {
         s_state.ui_temp_f[z]       = -1;
@@ -124,6 +125,32 @@ void dial_state_set_zone_on(zone_idx_t zone, bool on)
     xSemaphoreTake(s_mux, portMAX_DELAY);
     s_state.zones[zone].on = on;
     dial_state_predict_thermal(&s_state, zone);
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+}
+
+void dial_state_set_wifi_join(int idx, const char *ssid)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.wifi_join_idx = (int8_t)idx;
+    strlcpy(s_state.wifi_join_ssid, ssid ? ssid : "", sizeof(s_state.wifi_join_ssid));
+    s_state.wifi_join_failed = false;      // a fresh attempt is not a failed one
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+}
+
+void dial_state_set_wifi_join_failed(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.wifi_join_failed = true;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+}
+
+void dial_state_clear_wifi_join_failed(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.wifi_join_failed = false;
     s_state.generation++;
     xSemaphoreGive(s_mux);
 }

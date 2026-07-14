@@ -55,7 +55,10 @@ static lv_obj_t *s_prev_lbl, *s_cand_lbl, *s_next_lbl;
 static lv_obj_t *s_cand_btn;       // transparent >=72px hit box wrapping s_cand_lbl — the commit action
 static lv_obj_t *s_slot_hair;
 static lv_obj_t *s_del_btn, *s_del_glyph;
+static lv_obj_t *s_add_btn, *s_add_glyph;
 static lv_obj_t *s_done_btn, *s_done_glyph;
+static lv_obj_t *s_del_cap, *s_add_cap, *s_done_cap;
+static bool      s_last_failed;   // the previous attempt on this network was rejected
 
 static int  s_idx;                // network index this screen was opened for (arg)
 static int  s_pos;                // index into WHEEL
@@ -128,10 +131,16 @@ static void render_wheel(void)
 static void render_readout(void)
 {
     if (s_len == 0) {
-        lv_obj_set_style_text_opa(s_pw_lbl, LV_OPA_50, 0);
-        lv_label_set_text(s_pw_lbl, "tap the letter below to start");
+        // An empty field is also where the last attempt's verdict goes: the
+        // router rejecting a password is the one thing the user most needs told,
+        // and this is the line their eye is already on.
+        lv_obj_set_style_text_color(s_pw_lbl, s_last_failed ? PAL()->warning : PAL()->ink_primary, 0);
+        lv_obj_set_style_text_opa(s_pw_lbl, s_last_failed ? LV_OPA_COVER : LV_OPA_50, 0);
+        lv_label_set_text(s_pw_lbl, s_last_failed ? "That password didn't work. Try again."
+                                                  : "Spin the knob, then tap " LV_SYMBOL_OK);
         return;
     }
+    lv_obj_set_style_text_color(s_pw_lbl, PAL()->ink_primary, 0);
     lv_obj_set_style_text_opa(s_pw_lbl, LV_OPA_COVER, 0);
     char buf[sizeof(s_pw) + 1];
     snprintf(buf, sizeof(buf), "%s|", s_pw);
@@ -141,12 +150,15 @@ static void render_readout(void)
 /* ---- events ----------------------------------------------------------------*/
 
 // THE commit action: the knob only ever stages a candidate, this is what
-// writes it into the password. Guards s_len so a full buffer just ignores
-// further taps rather than truncating silently mid-character.
+// writes it into the password. Bound to the checkmark disc AND to the candidate
+// glyph itself, so whichever one the user reaches for does the same thing.
+// Guards s_len so a full buffer just ignores further taps rather than
+// truncating silently mid-character.
 static void cand_event_cb(lv_event_t *e)
 {
     (void)e;
     if (s_len >= (int)sizeof(s_pw) - 1) return;
+    s_last_failed = false;   // they're typing again; stop showing the old verdict
     s_pw[s_len++] = WHEEL[s_pos];
     s_pw[s_len] = '\0';
     dial_haptics_play(HAPTIC_CONFIRM);
@@ -176,6 +188,11 @@ static void done_event_cb(lv_event_t *e)
         return;
     }
     dial_haptics_play(HAPTIC_CONFIRM);
+    // Tell the store what we're attempting BEFORE handing the credentials over:
+    // the connecting screen names the network from this, and if the join is
+    // rejected, nav_policy uses it to bring the user back here rather than to
+    // the start of setup.
+    dial_state_set_wifi_join(s_idx, dial_net_scan_ssid(s_idx));
     dial_net_submit_creds(dial_net_scan_ssid(s_idx), s_pw);
     ui_router_go(SCR_CONNECTING, NULL, LV_SCR_LOAD_ANIM_FADE_ON);
 }
@@ -206,6 +223,12 @@ static void apply_palette(void)
     lv_obj_set_style_text_color(s_del_glyph, pal->ink_primary, 0);
 
 
+    lv_obj_set_style_bg_color(s_add_btn, pal->surface, 0);
+    lv_obj_set_style_border_color(s_add_btn, pal->ink_secondary, 0);   // the typing key carries the emphasis
+    lv_obj_set_style_text_color(s_add_glyph, pal->ink_primary, 0);
+    lv_obj_set_style_text_color(s_del_cap, pal->ink_secondary, 0);
+    lv_obj_set_style_text_color(s_add_cap, pal->ink_secondary, 0);
+    lv_obj_set_style_text_color(s_done_cap, pal->ink_secondary, 0);
     lv_obj_set_style_bg_color(s_done_btn, pal->surface, 0);
     lv_obj_set_style_border_color(s_done_btn, pal->track, 0);
     lv_obj_set_style_text_color(s_done_glyph, pal->ink_primary, 0);
@@ -219,6 +242,15 @@ static void create(lv_obj_t *scr, void *arg)
     s_pos = 0;
     s_len = 0;
     memset(s_pw, 0, sizeof(s_pw));
+
+    // Arriving here after a rejected password: say so, once, and clear the flag
+    // so nav_policy stops routing us here and lets the screen be sticky again.
+    {
+        app_state_t st;
+        dial_state_get(&st);
+        s_last_failed = st.wifi_join_failed;
+        if (s_last_failed) dial_state_clear_wifi_join_failed();
+    }
 
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
@@ -278,33 +310,68 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_transform_pivot_y(s_cand_lbl, LV_PCT(50), 0);
     lv_obj_center(s_cand_lbl);
 
-    // Bottom row of three 88px discs (radius 44 = a true circle, not a
-    // rounded square, so only the disc's own reach from center matters).
-    // At y=270 (dy=90 from CY) a disc centered farther out than x=80/280
-    // would poke past the panel's r=180 cutoff once its own 44px radius is
-    // added back in (dist-to-center + radius <= 180) — 76/284 as drafted
-    // computes to ~181.5 and just clips; 80/280 clears it with ~1.5px left.
+    /*
+     * Three discs, and the CHECKMARK IS THE ONE THAT TYPES.
+     *
+     * It used to be the finish button, with the letter itself as the commit
+     * target — and a tick sitting next to a letter reads as "take this letter",
+     * because that is what a tick means. So it is: the middle disc adds the
+     * candidate, and finishing gets its own disc with its own word under it.
+     * Every disc is captioned, because two glyph-only circles side by side are
+     * a guessing game on a screen someone uses once.
+     *
+     * Discs are true circles (radius 44), so only reach-from-centre matters:
+     * at y=240, a disc at x=84 sits 113px out, +44 = 157 < 180. The captions at
+     * y=292 stay inside the panel too (worst point ~166 from centre).
+     */
     s_del_btn = dial_btn_create(scr);
     lv_obj_set_size(s_del_btn, 88, 88);
     lv_obj_set_style_radius(s_del_btn, 44, 0);
     lv_obj_set_style_border_width(s_del_btn, 1, 0);
-    lv_obj_align(s_del_btn, LV_ALIGN_CENTER, 124 - CX, 270 - CY);
+    lv_obj_align(s_del_btn, LV_ALIGN_CENTER, 84 - CX, 240 - CY);
     lv_obj_add_event_cb(s_del_btn, del_event_cb, LV_EVENT_CLICKED, NULL);
     s_del_glyph = lv_label_create(s_del_btn);
     lv_obj_set_style_text_font(s_del_glyph, &lv_font_montserrat_28, 0);
     lv_label_set_text(s_del_glyph, LV_SYMBOL_BACKSPACE);
     lv_obj_center(s_del_glyph);
 
+    // The typing key. Biggest visual weight of the three: it is pressed once per
+    // character, the others once per password.
+    s_add_btn = dial_btn_create(scr);
+    lv_obj_set_size(s_add_btn, 88, 88);
+    lv_obj_set_style_radius(s_add_btn, 44, 0);
+    lv_obj_set_style_border_width(s_add_btn, 2, 0);
+    lv_obj_align(s_add_btn, LV_ALIGN_CENTER, 0, 240 - CY);
+    lv_obj_add_event_cb(s_add_btn, cand_event_cb, LV_EVENT_CLICKED, NULL);
+    s_add_glyph = lv_label_create(s_add_btn);
+    lv_obj_set_style_text_font(s_add_glyph, &lv_font_montserrat_28, 0);
+    lv_label_set_text(s_add_glyph, LV_SYMBOL_OK);
+    lv_obj_center(s_add_glyph);
+
     s_done_btn = dial_btn_create(scr);
     lv_obj_set_size(s_done_btn, 88, 88);
     lv_obj_set_style_radius(s_done_btn, 44, 0);
     lv_obj_set_style_border_width(s_done_btn, 1, 0);
-    lv_obj_align(s_done_btn, LV_ALIGN_CENTER, 236 - CX, 270 - CY);
+    lv_obj_align(s_done_btn, LV_ALIGN_CENTER, 276 - CX, 240 - CY);
     lv_obj_add_event_cb(s_done_btn, done_event_cb, LV_EVENT_CLICKED, NULL);
     s_done_glyph = lv_label_create(s_done_btn);
     lv_obj_set_style_text_font(s_done_glyph, &lv_font_montserrat_28, 0);
-    lv_label_set_text(s_done_glyph, LV_SYMBOL_OK);
+    lv_label_set_text(s_done_glyph, LV_SYMBOL_WIFI);
     lv_obj_center(s_done_glyph);
+
+    struct { lv_obj_t **lbl; const char *txt; lv_coord_t x; } caps[] = {
+        { &s_del_cap,  "Delete",  84  },
+        { &s_add_cap,  "Add",     180 },
+        { &s_done_cap, "Connect", 276 },
+    };
+    for (size_t i = 0; i < sizeof(caps) / sizeof(caps[0]); i++) {
+        lv_obj_t *c = lv_label_create(scr);
+        lv_obj_set_style_text_font(c, &lv_font_montserrat_12, 0);
+        lv_label_set_text(c, caps[i].txt);
+        lv_obj_align(c, LV_ALIGN_CENTER, caps[i].x - CX, 292 - CY);
+        lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
+        *caps[i].lbl = c;
+    }
 
     render_wheel();
     render_readout();
@@ -327,6 +394,9 @@ static void destroy(void)
     s_slot_hair = NULL;
     s_del_btn = s_del_glyph = NULL;
     s_done_btn = s_done_glyph = NULL;
+    s_add_btn = s_add_glyph = NULL;
+    s_del_cap = s_add_cap = s_done_cap = NULL;
+    s_last_failed = false;
 }
 
 static void on_state(const app_state_t *st)

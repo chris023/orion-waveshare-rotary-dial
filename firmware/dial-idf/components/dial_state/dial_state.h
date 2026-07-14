@@ -94,6 +94,17 @@ typedef struct {
     char    oauth_url[600];   // authorize URL while PH_OAUTH_WAIT_CONSENT
     char    ap_ssid[33];      // SoftAP name while PH_WIFI_PORTAL
 
+    /*
+     * On-device Wi-Fi setup. A rejected password must not throw the user back
+     * to the start of setup with no explanation — it has to say what went wrong
+     * and put them back on the password screen for the SAME network. So the
+     * store remembers which network the dial is trying, and whether the last
+     * attempt came back rejected.
+     */
+    char    wifi_join_ssid[33];
+    int8_t  wifi_join_idx;    // index into the scan list; -1 = came from the captive portal
+    bool    wifi_join_failed;
+
     // Device truth (valid once have_state)
     bool    have_state;
     char    serial[16];
@@ -235,6 +246,13 @@ void dial_state_set_haptics_enabled(bool enabled);
 // Screen rotation, quarter turns clockwise (0..3). Persisted; apply it to the
 // panel with dial_display_set_rotation.
 void dial_state_set_rotation(uint8_t quarters);
+
+// On-device Wi-Fi setup: what the dial is currently trying to join (called just
+// before the credentials are handed over), and whether that attempt was
+// rejected. See app_state_t's wifi_join_* fields.
+void dial_state_set_wifi_join(int idx, const char *ssid);
+void dial_state_set_wifi_join_failed(void);
+void dial_state_clear_wifi_join_failed(void);
 
 // --- Input quiet-period gate (torn-read-safe on 32-bit) ---
 void    dial_state_stamp_input(void);   // call on EVERY user input
