@@ -39,6 +39,7 @@ static int s_retries;
 static char s_ap_ssid[16];
 static esp_netif_t *s_sta_netif, *s_ap_netif;
 static httpd_handle_t s_httpd;
+static TaskHandle_t   s_dns_task;
 static volatile bool s_got_creds;
 
 // Post-boot reconnect: once a connection has been established, a drop retries
@@ -317,16 +318,61 @@ static void url_decode(char *s)
     *o = 0;
 }
 
+/*
+ * The network list is scanned ONCE, before any phone is attached, and cached.
+ *
+ * It used to be scanned inside root_get — a blocking, full-band scan on every
+ * request. To scan, the radio has to leave the AP's channel, which is the very
+ * channel the phone asking for the page is associated on: the access point
+ * effectively went off the air for seconds at a time, while the browser sat
+ * there waiting. And phones fire several captive-portal probes at "/" before
+ * the real page load, so each one kicked off another scan. That is why joining
+ * the setup network and loading its page both took forever.
+ */
+#define SCAN_MAX 20
+static char s_scan_ssid[SCAN_MAX][33];
+static int  s_scan_n;
+
+static void scan_cache_refresh(void)
+{
+    wifi_scan_config_t scan = {
+        .show_hidden = false,
+        .scan_type   = WIFI_SCAN_TYPE_ACTIVE,
+        // Explicit dwell times: the defaults are generous, and this runs while
+        // the user is standing there waiting for a page.
+        .scan_time.active = { .min = 40, .max = 90 },
+    };
+    if (esp_wifi_scan_start(&scan, true) != ESP_OK) return;
+
+    uint16_t n = SCAN_MAX;
+    wifi_ap_record_t recs[SCAN_MAX];
+    if (esp_wifi_scan_get_ap_records(&n, recs) != ESP_OK) return;
+
+    s_scan_n = 0;
+    for (int i = 0; i < n && s_scan_n < SCAN_MAX; i++) {
+        if (!recs[i].ssid[0]) continue;
+        bool dup = false;                       // one row per network, not per band/AP
+        for (int j = 0; j < s_scan_n; j++)
+            if (strcmp(s_scan_ssid[j], (const char *)recs[i].ssid) == 0) { dup = true; break; }
+        if (!dup) strlcpy(s_scan_ssid[s_scan_n++], (const char *)recs[i].ssid, sizeof(s_scan_ssid[0]));
+    }
+    ESP_LOGI(TAG, "portal: %d networks in range", s_scan_n);
+}
+
+// User-initiated rescan. This DOES bump the phone off-channel for a moment, but
+// it's a deliberate tap with a page waiting for it, not a hidden cost on every
+// request — and it's the way out if a network wasn't up during the first scan.
+static esp_err_t rescan_get(httpd_req_t *req)
+{
+    scan_cache_refresh();
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_sendstr(req, "rescanning");
+    return ESP_OK;
+}
+
 static esp_err_t root_get(httpd_req_t *req)
 {
-    // Scan for nearby networks to populate the dropdown.
-    wifi_scan_config_t scan = { .show_hidden = false };
-    esp_wifi_scan_start(&scan, true);
-    uint16_t n = 0;
-    esp_wifi_scan_get_ap_num(&n);
-    if (n > 20) n = 20;
-    wifi_ap_record_t recs[20];
-    esp_wifi_scan_get_ap_records(&n, recs);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr_chunk(req,
@@ -336,15 +382,20 @@ static esp_err_t root_get(httpd_req_t *req)
         "button{background:#0b6;color:#fff;border:0;border-radius:8px}</style></head><body>"
         "<h2>Orion Dial Wi-Fi setup</h2><form method=POST action=/save>"
         "<label>Network</label><select name=ssid>");
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < s_scan_n; i++) {          // cached: no scan on this path
         httpd_resp_sendstr_chunk(req, "<option>");
-        httpd_resp_sendstr_chunk(req, (char *)recs[i].ssid);
+        httpd_resp_sendstr_chunk(req, s_scan_ssid[i]);
         httpd_resp_sendstr_chunk(req, "</option>");
     }
     httpd_resp_sendstr_chunk(req,
-        "</select><label>Password</label><input name=pass type=password placeholder='Wi-Fi password'>"
+        "</select>"
+        "<label>Or type a network name</label>"
+        "<input name=other placeholder='Only if it isn&#39;t listed above'>"
+        "<label>Password</label><input name=pass type=password placeholder='Wi-Fi password'>"
         "<button type=submit>Connect</button></form>"
-        "<p style='color:#888;font-size:13px'>Pick your network, enter its password, and the dial will join it.</p>"
+        "<p style='color:#888;font-size:13px'>Pick your network, enter its password, and the dial will join it. "
+        "The dial's setup network will disappear as soon as it starts connecting — that's expected.</p>"
+        "<p><a href='/rescan' style='color:#0b6;font-size:13px'>Rescan for networks</a></p>"
         "</body></html>");
     httpd_resp_sendstr_chunk(req, NULL);
     return ESP_OK;
@@ -359,12 +410,21 @@ static esp_err_t save_post(httpd_req_t *req)
     body[got] = 0;
 
     s_form_ssid[0] = s_form_pass[0] = 0;
+    char other[33] = { 0 };
     char *ss = strstr(body, "ssid=");
+    char *oo = strstr(body, "other=");
     char *pp = strstr(body, "pass=");
     if (ss) { ss += 5; char *amp = strchr(ss, '&'); if (amp) *amp = 0;
               strncpy(s_form_ssid, ss, sizeof(s_form_ssid) - 1); url_decode(s_form_ssid); if (amp) *amp = '&'; }
+    if (oo) { oo += 6; char *amp = strchr(oo, '&'); if (amp) *amp = 0;
+              strncpy(other, oo, sizeof(other) - 1); url_decode(other); if (amp) *amp = '&'; }
     if (pp) { pp += 5; char *amp = strchr(pp, '&'); if (amp) *amp = 0;
               strncpy(s_form_pass, pp, sizeof(s_form_pass) - 1); url_decode(s_form_pass); }
+
+    // A typed name wins: it's only filled in when the network wasn't in the
+    // list (hidden, or out of range when the scan ran).
+    if (other[0]) strlcpy(s_form_ssid, other, sizeof(s_form_ssid));
+    if (!s_form_ssid[0]) return ESP_FAIL;   // nothing to join
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr(req,
@@ -397,17 +457,26 @@ static void portal_start(void)
     ap.ap.authmode = WIFI_AUTH_OPEN;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
 
+    // Scan NOW, while the AP is up but nobody has joined it yet — going
+    // off-channel costs nothing when there's no client to drop. By the time a
+    // phone asks for the page, the list is already in hand.
+    scan_cache_refresh();
+
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.max_uri_handlers = 8;
     hc.lru_purge_enable = true;
     ESP_ERROR_CHECK(httpd_start(&s_httpd, &hc));
-    httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = root_get };
-    httpd_uri_t save = { .uri = "/save", .method = HTTP_POST, .handler = save_post };
+    httpd_uri_t root   = { .uri = "/", .method = HTTP_GET, .handler = root_get };
+    httpd_uri_t save   = { .uri = "/save", .method = HTTP_POST, .handler = save_post };
+    httpd_uri_t rescan = { .uri = "/rescan", .method = HTTP_GET, .handler = rescan_get };
     httpd_register_uri_handler(s_httpd, &root);
     httpd_register_uri_handler(s_httpd, &save);
+    httpd_register_uri_handler(s_httpd, &rescan);
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, redirect_404);
 
-    xTaskCreate(dns_hijack_task, "dns", 3072, NULL, 5, NULL);
+    // Only ever one DNS task: portal_start runs again on a failed password, and
+    // a second one would just fail to bind port 53 and die.
+    if (!s_dns_task) xTaskCreate(dns_hijack_task, "dns", 3072, NULL, 5, &s_dns_task);
     ESP_LOGI(TAG, "captive portal up — join Wi-Fi \"%s\" then open any page", s_ap_ssid);
 }
 
@@ -464,16 +533,32 @@ void dial_net_bringup(void)
         s_got_creds = false;
         while (!s_got_creds)
             vTaskDelay(pdMS_TO_TICKS(100));
-        // Give the "Connecting…" page a moment to flush, then try.
-        vTaskDelay(pdMS_TO_TICKS(500));
+
+        // Flush the "Connecting…" page, then take the portal DOWN before
+        // dialling the real network — not after it succeeds.
+        //
+        // The phone's captive-portal sheet stays open until this AP goes away,
+        // so leaving it up for the whole join + DHCP was most of the wait the
+        // user actually sat through. And it bought nothing: in APSTA the AP is
+        // dragged onto the station's channel the instant it associates, which
+        // knocks the phone off anyway. Dropping it first is both faster and
+        // cleaner.
+        vTaskDelay(pdMS_TO_TICKS(300));
+        portal_stop();
+        esp_wifi_set_mode(WIFI_MODE_STA);
+
         if (sta_connect(s_form_ssid, s_form_pass, 20000)) {
             save_creds(s_form_ssid, s_form_pass);
             setup_request_clear();   // provisioned: stop forcing the portal
-            portal_stop();
-            esp_wifi_set_mode(WIFI_MODE_STA);
             ESP_LOGI(TAG, "provisioned + connected");
             return;
         }
-        ESP_LOGW(TAG, "those creds didn't connect — portal still open");
+
+        // Wrong password, or the network wasn't there. Put the portal back and
+        // let them try again: phones re-join an open AP they've just used on
+        // their own, and re-show the page with it.
+        ESP_LOGW(TAG, "those creds didn't connect — reopening the portal");
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+        portal_start();
     }
 }
