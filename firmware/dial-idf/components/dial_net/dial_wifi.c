@@ -32,6 +32,7 @@ static const char *TAG = "net";
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
+#define WIFI_AP_STARTED_BIT BIT2   // the AP is actually beaconing, per the driver
 #define NVS_NS   "wifi"
 
 static EventGroupHandle_t s_events;
@@ -156,6 +157,10 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         // sta_connect() issues the connect itself; connecting here as well
         // caused the benign-but-noisy "sta is connecting" error at boot.
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_START) {
+        // The only trustworthy signal that the setup network exists. Nothing may
+        // invite a phone to join it before this fires.
+        xEventGroupSetBits(s_events, WIFI_AP_STARTED_BIT);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         bool was_connected = s_connected;
         s_connected = false;
@@ -390,6 +395,26 @@ static void scan_cache_refresh(void)
     ESP_LOGI(TAG, "portal: %d networks in range", s_scan_n);
 }
 
+/* ---- what the dial's own setup screens read and write ------------------ */
+
+static volatile bool s_rescan_req;
+
+int         dial_net_scan_count(void)      { return s_scan_n; }
+const char *dial_net_scan_ssid(int i)      { return (i >= 0 && i < s_scan_n) ? s_scan_ssid[i] : ""; }
+void        dial_net_scan_request(void)    { s_rescan_req = true; }
+
+// The dial's own password screen hands credentials in here — the same door the
+// captive-portal form uses, so both paths converge on one state machine and
+// there is no second copy of "now go and connect".
+void dial_net_submit_creds(const char *ssid, const char *pass)
+{
+    if (!ssid || !ssid[0]) return;
+    strlcpy(s_form_ssid, ssid, sizeof(s_form_ssid));
+    strlcpy(s_form_pass, pass ? pass : "", sizeof(s_form_pass));
+    ESP_LOGI(TAG, "credentials entered on the dial for \"%s\"", s_form_ssid);
+    s_got_creds = true;
+}
+
 // User-initiated rescan. This DOES bump the phone off-channel for a moment, but
 // it's a deliberate tap with a page waiting for it, not a hidden cost on every
 // request — and it's the way out if a network wasn't up during the first scan.
@@ -524,9 +549,22 @@ static esp_err_t redirect_404(httpd_req_t *req, httpd_err_code_t err)
     return ESP_OK;
 }
 
-static void portal_start(void)
+/*
+ * Bring the setup network up, in Espressif's documented order.
+ *
+ * esp_wifi_start() is specified as "Start WiFi according to current
+ * configuration", and every official Espressif SoftAP example sets the AP
+ * config BEFORE starting. We were doing the opposite: starting first, then
+ * calling set_config, which brings up a default empty-SSID AP and then tears it
+ * down and restarts it under the real name — a beacon-identity change moments
+ * before we asked a phone to join. Config first, then start, then wait for the
+ * driver to actually say the AP is up.
+ */
+static bool ap_up(void)
 {
-    // AP config: open network named OrionDial-XXXX.
+    ESP_ERROR_CHECK(esp_wifi_stop());
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+
     wifi_config_t ap = { 0 };
     strncpy((char *)ap.ap.ssid, s_ap_ssid, sizeof(ap.ap.ssid) - 1);
     ap.ap.ssid_len = strlen(s_ap_ssid);
@@ -535,6 +573,24 @@ static void portal_start(void)
     ap.ap.authmode = WIFI_AUTH_OPEN;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
 
+    xEventGroupClearBits(s_events, WIFI_AP_STARTED_BIT);
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Don't take esp_wifi_start() returning as proof the network exists — wait
+    // for the driver's own AP_START. Everything downstream (the servers, and the
+    // instruction telling the user to look for this SSID) depends on it.
+    EventBits_t bits = xEventGroupWaitBits(s_events, WIFI_AP_STARTED_BIT,
+                                           pdFALSE, pdFALSE, pdMS_TO_TICKS(5000));
+    if (!(bits & WIFI_AP_STARTED_BIT)) {
+        ESP_LOGE(TAG, "SoftAP never came up");
+        return false;
+    }
+    ESP_LOGI(TAG, "SoftAP \"%s\" up on channel %d", s_ap_ssid, s_ap_channel);
+    return true;
+}
+
+static void portal_start(void)
+{
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.max_uri_handlers = 8;
     hc.lru_purge_enable = true;
@@ -598,30 +654,35 @@ void dial_net_bringup(void)
     }
 
     /*
-     * 2) Run the captive portal until we get creds that connect.
+     * 2) Setup mode, until we get credentials that connect. Two ways in, and
+     *    they share this one state machine:
+     *      - the phone joins the dial's SoftAP and uses the captive portal, or
+     *      - the user picks the network and types the password ON THE DIAL,
+     *        which calls dial_net_submit_creds() directly.
      *
-     * ORDER MATTERS, and getting it wrong is what made this flaky. The QR on
-     * screen is an invitation to join a network — so that network, its DHCP
-     * server and its web server all have to be up and stable BEFORE the QR is
-     * shown. Previously the QR went up first, and the radio then spent a second
-     * or two configuring the AP and running an off-channel scan: a phone that
-     * scanned the code promptly tried to associate with an AP that wasn't
-     * listening yet, got "failed to join", and iOS then backed off for 10-20
-     * seconds before it would even try again.
-     *
-     * So: scan first (no AP yet — nothing to disturb), then bring the AP and
-     * the servers up, and only then invite anyone.
+     * Scan FIRST, with no AP running: a scan takes the single radio off-channel,
+     * which would drop anyone trying to join. Then bring the AP up (config
+     * before start, and wait for the driver to confirm it), then the servers,
+     * and only then tell the UI it's safe to send a phone at it.
      */
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
-    scan_cache_refresh();
-    portal_start();
-    emit(DIAL_NET_EV_PORTAL);      // the QR goes up last: the network exists now
+    scan_cache_refresh();          // network list for BOTH the portal page and the dial's own picker
+    if (ap_up()) portal_start();
+    emit(DIAL_NET_EV_PORTAL);
 
     for (;;) {
         s_got_creds = false;
-        while (!s_got_creds)
+        while (!s_got_creds) {
+            // A rescan asked for from the dial's own network picker. It happens
+            // here, on this task, because a scan must never run on the LVGL task
+            // (it blocks for a second-plus and would freeze the UI).
+            if (s_rescan_req) {
+                s_rescan_req = false;
+                scan_cache_refresh();
+            }
             vTaskDelay(pdMS_TO_TICKS(100));
+        }
 
         // Flush the "Connecting&hellip;" page, then take the portal DOWN before
         // dialling the real network — not after it succeeds.
@@ -631,11 +692,12 @@ void dial_net_bringup(void)
         // user actually sat through. And it bought nothing: in APSTA the AP is
         // dragged onto the station's channel the instant it associates, which
         // knocks the phone off anyway. Dropping it first is both faster and
-        // cleaner.
+        // cleaner. (Credentials typed on the dial take this same path — there
+        // just wasn't a phone attached to inconvenience.)
         vTaskDelay(pdMS_TO_TICKS(300));
         portal_stop();
         esp_wifi_set_mode(WIFI_MODE_STA);
-        emit(DIAL_NET_EV_CONNECTING);   // the dial stops showing a QR for a network it just took down
+        emit(DIAL_NET_EV_CONNECTING);
 
         if (sta_connect(s_form_ssid, s_form_pass, 20000)) {
             save_creds(s_form_ssid, s_form_pass);
@@ -647,9 +709,8 @@ void dial_net_bringup(void)
         // Wrong password, or the network wasn't there. Put the portal back and
         // let them try again: phones re-join an open AP they've just used on
         // their own, and re-show the page with it.
-        ESP_LOGW(TAG, "those creds didn't connect — reopening the portal");
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-        portal_start();
-        emit(DIAL_NET_EV_PORTAL);       // again: the QR only after the AP is back
+        ESP_LOGW(TAG, "those creds didn't connect — back to setup");
+        if (ap_up()) portal_start();
+        emit(DIAL_NET_EV_PORTAL);
     }
 }

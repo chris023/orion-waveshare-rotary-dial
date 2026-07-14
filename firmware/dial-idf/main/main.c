@@ -135,7 +135,14 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         return SCR_WELCOME;
 
     switch (st->phase) {
-    case PH_WIFI_PORTAL:        return SCR_WIFI_PORTAL;
+    case PH_WIFI_PORTAL: {
+        // Setting up on the dial (network list, password entry) is a deliberate
+        // journey inside this phase — a routine state commit must not yank the
+        // user back to the instructions screen halfway through typing.
+        screen_id_t cur = ui_router_current();
+        if (cur == SCR_NETPICK || cur == SCR_PASSKEY) return cur;
+        return SCR_WIFI_PORTAL;
+    }
     case PH_OAUTH_WAIT_CONSENT: return SCR_OAUTH_QR;
     case PH_READY:
     case PH_DEGRADED:

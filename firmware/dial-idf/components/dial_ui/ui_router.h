@@ -17,7 +17,9 @@
 
 typedef enum {
     SCR_CONNECTING = 0,   // boot/progress/status text
-    SCR_WIFI_PORTAL,      // SoftAP join instructions + QR
+    SCR_WIFI_PORTAL,      // how to hand the dial your Wi-Fi (SoftAP name + the on-device way in)
+    SCR_NETPICK,          // pick the home network on the dial itself (arg: unused)
+    SCR_PASSKEY,          // type its password with the knob (arg: network index)
     SCR_OAUTH_QR,         // Orion link QR
     SCR_DIAL,             // the temperature dial (arg: zone_idx_t)
     SCR_MENU,             // vertical menu, third face of the swipe chain (arg: unused/NULL)

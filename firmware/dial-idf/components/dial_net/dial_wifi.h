@@ -56,6 +56,24 @@ void dial_net_bringup(void);
 // The SoftAP SSID used during setup (e.g. "OrionDial-A1B2"). Valid after init.
 const char *dial_net_ap_ssid(void);
 
+/*
+ * On-device setup (no phone). The dial can list the networks it can see and
+ * take credentials from its own screen, which is the fallback for anyone who
+ * doesn't want to hand their Wi-Fi password to a captive portal — and the path
+ * a Nest thermostat takes with its ring. The scan list is populated when the
+ * portal comes up; the UI reads it, and hands credentials back through
+ * dial_net_submit_creds, which is the SAME entry point the web form uses.
+ */
+int         dial_net_scan_count(void);
+const char *dial_net_scan_ssid(int i);      // "" if i is out of range
+
+// Ask for a fresh scan. Non-blocking: the provisioning task performs it (a scan
+// takes the radio off-channel, which must never happen on the LVGL task).
+void dial_net_scan_request(void);
+
+// Hand credentials to the provisioning state machine, from the dial's own UI.
+void dial_net_submit_creds(const char *ssid, const char *pass);
+
 // True while the station currently holds an IP lease.
 bool dial_wifi_is_connected(void);
 

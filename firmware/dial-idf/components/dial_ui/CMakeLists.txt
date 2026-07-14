@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS "ui_router.c" "ui_screens.c" "scr_connecting.c" "scr_setup.c" "scr_dial.c"
+         "scr_netpick.c" "scr_passkey.c"
          "scr_menu.c" "scr_tonight.c" "scr_wifi.c" "scr_about.c"
          "scr_standby.c" "scr_quick.c" "scr_boost.c" "scr_welcome.c" "scr_sidepick.c"
          "scr_settings.c" "dial_palette.c" "dial_list.c" "dial_font_num_88.c"
