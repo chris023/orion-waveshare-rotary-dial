@@ -411,9 +411,9 @@ static esp_err_t root_get(httpd_req_t *req)
      * second field any more: it only exists once you pick "My network isn't
      * listed" from the same dropdown, and then it IS the answer.
      */
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=UTF-8");
     httpd_resp_sendstr_chunk(req,
-        "<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>Orion Dial setup</title><style>"
         "body{font-family:-apple-system,system-ui,sans-serif;max-width:420px;margin:24px auto;padding:0 16px;color:#1a1a1a}"
         "h2{color:#0b6}label{display:block;margin-top:14px;font-size:14px;font-weight:600}"
@@ -430,7 +430,7 @@ static esp_err_t root_get(httpd_req_t *req)
         // whichever SSID happened to sort first. Make the choice deliberate.
         "<select name=ssid id=ssid required onchange=\"document.getElementById('otherwrap')"
         ".style.display=(this.value=='__other__')?'block':'none'\">"
-        "<option value='' disabled selected>Choose a network\xE2\x80\xA6</option>");
+        "<option value='' disabled selected>Choose a network&hellip;</option>");
 
     for (int i = 0; i < s_scan_n; i++) {          // cached: no scan on this path
         httpd_resp_sendstr_chunk(req, "<option>");
@@ -439,7 +439,7 @@ static esp_err_t root_get(httpd_req_t *req)
     }
 
     httpd_resp_sendstr_chunk(req,
-        "<option value='__other__'>My network isn't listed\xE2\x80\xA6</option>"
+        "<option value='__other__'>My network isn't listed&hellip;</option>"
         "</select>"
         "<div id=otherwrap>"
         "<label for=other>Network name</label>"
@@ -450,7 +450,7 @@ static esp_err_t root_get(httpd_req_t *req)
         "<label for=pass>Password</label>"
         "<input name=pass id=pass type=password placeholder='Wi-Fi password'>"
         "<button type=submit>Connect</button></form>"
-        "<p class=hint>The dial's setup network disappears as soon as it starts connecting \xE2\x80\x94 "
+        "<p class=hint>The dial's setup network disappears as soon as it starts connecting &mdash; "
         "that's expected, and your phone will drop back to its usual Wi-Fi.</p>"
         "<p><a href='/rescan' style='color:#0b6;font-size:13px'>Rescan for networks</a></p>"
         "</body></html>");
@@ -492,9 +492,9 @@ static esp_err_t save_post(httpd_req_t *req)
     if (problem) {
         // Say what's missing and send them back, rather than failing the
         // request and leaving the browser on a blank error page.
-        httpd_resp_set_type(req, "text/html");
+        httpd_resp_set_type(req, "text/html; charset=UTF-8");
         httpd_resp_sendstr_chunk(req,
-            "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
             "<body style='font-family:-apple-system,system-ui,sans-serif;text-align:center;margin-top:40px'>"
             "<h2>Almost</h2><p>");
         httpd_resp_sendstr_chunk(req, problem);
@@ -504,11 +504,11 @@ static esp_err_t save_post(httpd_req_t *req)
         return ESP_OK;
     }
 
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=UTF-8");
     httpd_resp_sendstr(req,
-        "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
         "<body style='font-family:sans-serif;text-align:center;margin-top:40px'>"
-        "<h2 style='color:#0b6'>Connecting…</h2><p>The dial is joining your network. "
+        "<h2 style='color:#0b6'>Connecting&hellip;</h2><p>The dial is joining your network. "
         "You can close this page.</p></body>");
     ESP_LOGI(TAG, "portal submitted SSID \"%s\"", s_form_ssid);
     s_got_creds = true;
@@ -623,7 +623,7 @@ void dial_net_bringup(void)
         while (!s_got_creds)
             vTaskDelay(pdMS_TO_TICKS(100));
 
-        // Flush the "Connecting…" page, then take the portal DOWN before
+        // Flush the "Connecting&hellip;" page, then take the portal DOWN before
         // dialling the real network — not after it succeeds.
         //
         // The phone's captive-portal sheet stays open until this AP goes away,
