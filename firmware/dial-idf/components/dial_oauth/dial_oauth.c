@@ -247,6 +247,21 @@ void dial_oauth_forget(void)
     nvs_close(h);
 }
 
+// Drop ONLY the access token, keeping the refresh token and client_id.
+// dial_oauth_have_valid_access() reports presence, not validity, so a token the
+// server has expired or revoked still reads as "valid" here and the supervisor
+// would skip the refresh branch forever. Erasing it is what lets the next pass
+// fall through to refresh — and, if that fails too, to interactive consent —
+// instead of spinning on a token that will never be accepted again.
+void dial_oauth_forget_access(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_erase_key(h, "access");
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 bool dial_oauth_have_valid_access(void)
 {
     // No wall clock yet: presence == usable. Expiry is handled by refreshing on

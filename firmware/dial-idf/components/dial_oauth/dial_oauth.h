@@ -47,6 +47,11 @@ bool dial_oauth_refresh(const oauth_disc_t *disc, const char *client_id);
 // falls back to interactive consent.
 void dial_oauth_forget(void);
 
+// Drop only the access token (keep the refresh token + client_id), so the next
+// supervisor pass re-runs refresh instead of reusing a token the server has
+// already rejected. See the note in dial_oauth_have_valid_access.
+void dial_oauth_forget_access(void);
+
 // Interactive authorization (on-device consent):
 //  1) start: generate PKCE + state, build the authorize URL (for the on-screen
 //     QR), and start the LAN callback HTTP server. Fills url_out.

@@ -963,7 +963,27 @@ static void worker_task(void *arg)
         }
 
         dial_state_set_phase(PH_MCP_CONNECTING, NULL);
-        if (!dial_mcp_connect(NULL) || !orion_discover_device()) {
+        bool linked = dial_mcp_connect(NULL) && orion_discover_device();
+        if (!linked) {
+            // The token can be dead server-side while still looking usable here:
+            // dial_oauth_have_valid_access() reports that an access token EXISTS,
+            // not that it's still good, and the whole design leans on refreshing
+            // when a call comes back 401. Reads and writes get that from
+            // with_auth_retry — this first connect never did, so an expired or
+            // revoked token produced "Orion unreachable", a backoff, and then a
+            // loop that skipped the refresh branch again on every pass, forever.
+            // Force one refresh and retry.
+            if (dial_oauth_refresh(&disc, client_id)) {
+                linked = dial_mcp_connect(NULL) && orion_discover_device();
+            } else {
+                // The refresh token is dead too. Drop the stale access token so
+                // the next pass falls through to interactive consent (the QR)
+                // rather than spinning on credentials that can never work again.
+                ESP_LOGW(TAG, "refresh failed on a rejected token — re-linking");
+                dial_oauth_forget_access();
+            }
+        }
+        if (!linked) {
             dial_state_set_phase(PH_DEGRADED, dial_mcp_last_error());
             backoff_wait(backoff_s);
             backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
