@@ -13,6 +13,7 @@
 #include "dial_wifi.h"
 
 #include <string.h>
+#include <limits.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -332,6 +333,34 @@ static void url_decode(char *s)
 #define SCAN_MAX 20
 static char s_scan_ssid[SCAN_MAX][33];
 static int  s_scan_n;
+static uint8_t s_ap_channel = 1;   // chosen from the scan; see pick_channel()
+
+// Park the AP on the emptiest of the three non-overlapping channels. A crowded
+// channel is a real source of "failed to join": association frames get lost in
+// the noise and the phone gives up long before the dial has done anything
+// wrong. The scan is already in hand, so this costs nothing.
+static void pick_channel(const wifi_ap_record_t *recs, int n)
+{
+    int load[12] = { 0 };
+    for (int i = 0; i < n; i++) {
+        int ch = recs[i].primary;
+        if (ch >= 1 && ch <= 11) {
+            load[ch] += 2;                       // its own channel
+            for (int d = 1; d <= 2; d++) {       // and its skirts, which still collide
+                if (ch - d >= 1)  load[ch - d]++;
+                if (ch + d <= 11) load[ch + d]++;
+            }
+        }
+    }
+    const uint8_t cands[] = { 1, 6, 11 };
+    uint8_t best = 1;
+    int best_load = INT_MAX;
+    for (size_t i = 0; i < sizeof(cands); i++) {
+        if (load[cands[i]] < best_load) { best_load = load[cands[i]]; best = cands[i]; }
+    }
+    s_ap_channel = best;
+    ESP_LOGI(TAG, "portal: AP on channel %d (load %d)", best, best_load);
+}
 
 static void scan_cache_refresh(void)
 {
@@ -347,6 +376,8 @@ static void scan_cache_refresh(void)
     uint16_t n = SCAN_MAX;
     wifi_ap_record_t recs[SCAN_MAX];
     if (esp_wifi_scan_get_ap_records(&n, recs) != ESP_OK) return;
+
+    pick_channel(recs, n);
 
     s_scan_n = 0;
     for (int i = 0; i < n && s_scan_n < SCAN_MAX; i++) {
@@ -374,27 +405,53 @@ static esp_err_t rescan_get(httpd_req_t *req)
 static esp_err_t root_get(httpd_req_t *req)
 {
 
+    /*
+     * ONE question, one answer. The list and a free-text box side by side left
+     * it ambiguous which won if you filled in both — so the text box is not a
+     * second field any more: it only exists once you pick "My network isn't
+     * listed" from the same dropdown, and then it IS the answer.
+     */
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr_chunk(req,
         "<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<title>Orion Dial setup</title><style>body{font-family:sans-serif;max-width:420px;margin:24px auto;padding:0 16px}"
-        "h2{color:#0b6}input,select,button{width:100%;padding:12px;margin:6px 0;font-size:16px;box-sizing:border-box}"
-        "button{background:#0b6;color:#fff;border:0;border-radius:8px}</style></head><body>"
+        "<title>Orion Dial setup</title><style>"
+        "body{font-family:-apple-system,system-ui,sans-serif;max-width:420px;margin:24px auto;padding:0 16px;color:#1a1a1a}"
+        "h2{color:#0b6}label{display:block;margin-top:14px;font-size:14px;font-weight:600}"
+        "input,select,button{width:100%;padding:12px;margin:6px 0;font-size:16px;box-sizing:border-box;"
+        "border:1px solid #ccc;border-radius:8px}"
+        "button{background:#0b6;color:#fff;border:0;margin-top:18px;font-weight:600}"
+        ".hint{color:#888;font-size:13px}"
+        "#otherwrap{display:none}"
+        "</style></head><body>"
         "<h2>Orion Dial Wi-Fi setup</h2><form method=POST action=/save>"
-        "<label>Network</label><select name=ssid>");
+        "<label for=ssid>Network</label>"
+        // Without a placeholder the browser silently pre-selects the first
+        // network, so someone who goes straight to the password field submits
+        // whichever SSID happened to sort first. Make the choice deliberate.
+        "<select name=ssid id=ssid required onchange=\"document.getElementById('otherwrap')"
+        ".style.display=(this.value=='__other__')?'block':'none'\">"
+        "<option value='' disabled selected>Choose a network\xE2\x80\xA6</option>");
+
     for (int i = 0; i < s_scan_n; i++) {          // cached: no scan on this path
         httpd_resp_sendstr_chunk(req, "<option>");
         httpd_resp_sendstr_chunk(req, s_scan_ssid[i]);
         httpd_resp_sendstr_chunk(req, "</option>");
     }
+
     httpd_resp_sendstr_chunk(req,
+        "<option value='__other__'>My network isn't listed\xE2\x80\xA6</option>"
         "</select>"
-        "<label>Or type a network name</label>"
-        "<input name=other placeholder='Only if it isn&#39;t listed above'>"
-        "<label>Password</label><input name=pass type=password placeholder='Wi-Fi password'>"
+        "<div id=otherwrap>"
+        "<label for=other>Network name</label>"
+        "<input name=other id=other placeholder='Exact name, including capitals'>"
+        "</div>"
+        // No JS in this webview? Then the box can't be revealed, so show it.
+        "<noscript><style>#otherwrap{display:block}</style></noscript>"
+        "<label for=pass>Password</label>"
+        "<input name=pass id=pass type=password placeholder='Wi-Fi password'>"
         "<button type=submit>Connect</button></form>"
-        "<p style='color:#888;font-size:13px'>Pick your network, enter its password, and the dial will join it. "
-        "The dial's setup network will disappear as soon as it starts connecting — that's expected.</p>"
+        "<p class=hint>The dial's setup network disappears as soon as it starts connecting \xE2\x80\x94 "
+        "that's expected, and your phone will drop back to its usual Wi-Fi.</p>"
         "<p><a href='/rescan' style='color:#0b6;font-size:13px'>Rescan for networks</a></p>"
         "</body></html>");
     httpd_resp_sendstr_chunk(req, NULL);
@@ -421,10 +478,31 @@ static esp_err_t save_post(httpd_req_t *req)
     if (pp) { pp += 5; char *amp = strchr(pp, '&'); if (amp) *amp = 0;
               strncpy(s_form_pass, pp, sizeof(s_form_pass) - 1); url_decode(s_form_pass); }
 
-    // A typed name wins: it's only filled in when the network wasn't in the
-    // list (hidden, or out of range when the scan ran).
-    if (other[0]) strlcpy(s_form_ssid, other, sizeof(s_form_ssid));
-    if (!s_form_ssid[0]) return ESP_FAIL;   // nothing to join
+    // One question, one answer: the typed name is only consulted when the list
+    // itself said "not listed", so there is never a case where both are filled
+    // in and one silently loses.
+    const char *problem = NULL;
+    if (strcmp(s_form_ssid, "__other__") == 0) {
+        if (other[0]) strlcpy(s_form_ssid, other, sizeof(s_form_ssid));
+        else          problem = "Type the name of your network.";
+    } else if (!s_form_ssid[0]) {
+        problem = "Choose your network from the list.";
+    }
+
+    if (problem) {
+        // Say what's missing and send them back, rather than failing the
+        // request and leaving the browser on a blank error page.
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_sendstr_chunk(req,
+            "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<body style='font-family:-apple-system,system-ui,sans-serif;text-align:center;margin-top:40px'>"
+            "<h2>Almost</h2><p>");
+        httpd_resp_sendstr_chunk(req, problem);
+        httpd_resp_sendstr_chunk(req,
+            "</p><p><a href='/' style='color:#0b6'>Back</a></p></body>");
+        httpd_resp_sendstr_chunk(req, NULL);
+        return ESP_OK;
+    }
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr(req,
@@ -452,15 +530,10 @@ static void portal_start(void)
     wifi_config_t ap = { 0 };
     strncpy((char *)ap.ap.ssid, s_ap_ssid, sizeof(ap.ap.ssid) - 1);
     ap.ap.ssid_len = strlen(s_ap_ssid);
-    ap.ap.channel = 1;
+    ap.ap.channel = s_ap_channel;   // emptiest of 1/6/11, from the scan
     ap.ap.max_connection = 4;
     ap.ap.authmode = WIFI_AUTH_OPEN;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
-
-    // Scan NOW, while the AP is up but nobody has joined it yet — going
-    // off-channel costs nothing when there's no client to drop. By the time a
-    // phone asks for the page, the list is already in hand.
-    scan_cache_refresh();
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.max_uri_handlers = 8;
@@ -524,11 +597,27 @@ void dial_net_bringup(void)
         esp_wifi_stop();
     }
 
-    // 2) Run the captive portal until we get creds that connect.
-    emit(DIAL_NET_EV_PORTAL);
+    /*
+     * 2) Run the captive portal until we get creds that connect.
+     *
+     * ORDER MATTERS, and getting it wrong is what made this flaky. The QR on
+     * screen is an invitation to join a network — so that network, its DHCP
+     * server and its web server all have to be up and stable BEFORE the QR is
+     * shown. Previously the QR went up first, and the radio then spent a second
+     * or two configuring the AP and running an off-channel scan: a phone that
+     * scanned the code promptly tried to associate with an AP that wasn't
+     * listening yet, got "failed to join", and iOS then backed off for 10-20
+     * seconds before it would even try again.
+     *
+     * So: scan first (no AP yet — nothing to disturb), then bring the AP and
+     * the servers up, and only then invite anyone.
+     */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_start());
+    scan_cache_refresh();
     portal_start();
+    emit(DIAL_NET_EV_PORTAL);      // the QR goes up last: the network exists now
+
     for (;;) {
         s_got_creds = false;
         while (!s_got_creds)
@@ -546,6 +635,7 @@ void dial_net_bringup(void)
         vTaskDelay(pdMS_TO_TICKS(300));
         portal_stop();
         esp_wifi_set_mode(WIFI_MODE_STA);
+        emit(DIAL_NET_EV_CONNECTING);   // the dial stops showing a QR for a network it just took down
 
         if (sta_connect(s_form_ssid, s_form_pass, 20000)) {
             save_creds(s_form_ssid, s_form_pass);
@@ -560,5 +650,6 @@ void dial_net_bringup(void)
         ESP_LOGW(TAG, "those creds didn't connect — reopening the portal");
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
         portal_start();
+        emit(DIAL_NET_EV_PORTAL);       // again: the QR only after the AP is back
     }
 }
