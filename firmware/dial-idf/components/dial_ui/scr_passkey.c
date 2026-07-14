@@ -34,16 +34,20 @@
 #define CX 180
 #define CY 180
 
-// Four charsets the SET button cycles through; the trailing space in the
-// symbol set is deliberate — SSID passwords are free-form and can contain
-// spaces, so leaving it out would make some real passwords untypeable here.
-static const char *SETS[4] = {
-    "abcdefghijklmnopqrstuvwxyz",
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    "0123456789",
-    "!@#$%^&*()-_=+[]{};:,.<>/?~ ",
-};
-static const char *SET_NAMES[4] = { "abc", "ABC", "123", "#$%" };
+/*
+ * ONE alphabet, not four with a mode button. The knob simply keeps turning:
+ * lowercase, then uppercase, then digits, then symbols. A mode toggle is a
+ * second thing to understand and a second place to be lost — "which set am I
+ * in?" — for a screen someone uses once. Turning further is not a mode.
+ *
+ * The trailing space is deliberate: Wi-Fi passwords are free-form and can
+ * contain spaces, and leaving it out would make some real passwords untypeable.
+ */
+static const char WHEEL[] =
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "!@#$%^&*()-_=+[]{};:,.<>/?~ ";
 
 static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_pw_lbl;
@@ -51,12 +55,10 @@ static lv_obj_t *s_prev_lbl, *s_cand_lbl, *s_next_lbl;
 static lv_obj_t *s_cand_btn;       // transparent >=72px hit box wrapping s_cand_lbl — the commit action
 static lv_obj_t *s_slot_hair;
 static lv_obj_t *s_del_btn, *s_del_glyph;
-static lv_obj_t *s_set_btn, *s_set_lbl;
 static lv_obj_t *s_done_btn, *s_done_glyph;
 
 static int  s_idx;                // network index this screen was opened for (arg)
-static int  s_set;                // which row of SETS[] the wheel is on
-static int  s_pos;                // index within SETS[s_set]
+static int  s_pos;                // index into WHEEL
 static char s_pw[65];
 static int  s_len;
 
@@ -109,18 +111,15 @@ static void set_wheel_glyph(lv_obj_t *lbl, char c)
 
 static void render_wheel(void)
 {
-    const char *set = SETS[s_set];
-    int n = (int)strlen(set);
+    int n = (int)strlen(WHEEL);
 
-    if (s_pos > 0) set_wheel_glyph(s_prev_lbl, set[s_pos - 1]);
+    if (s_pos > 0) set_wheel_glyph(s_prev_lbl, WHEEL[s_pos - 1]);
     else           lv_label_set_text(s_prev_lbl, "");
 
-    set_wheel_glyph(s_cand_lbl, set[s_pos]);
+    set_wheel_glyph(s_cand_lbl, WHEEL[s_pos]);
 
-    if (s_pos < n - 1) set_wheel_glyph(s_next_lbl, set[s_pos + 1]);
-    else                lv_label_set_text(s_next_lbl, "");
-
-    lv_label_set_text(s_set_lbl, SET_NAMES[s_set]);
+    if (s_pos < n - 1) set_wheel_glyph(s_next_lbl, WHEEL[s_pos + 1]);
+    else               lv_label_set_text(s_next_lbl, "");
 }
 
 // Cleartext readout with a trailing "|" caret standing in for the wheel's
@@ -148,7 +147,7 @@ static void cand_event_cb(lv_event_t *e)
 {
     (void)e;
     if (s_len >= (int)sizeof(s_pw) - 1) return;
-    s_pw[s_len++] = SETS[s_set][s_pos];
+    s_pw[s_len++] = WHEEL[s_pos];
     s_pw[s_len] = '\0';
     dial_haptics_play(HAPTIC_CONFIRM);
     render_readout();
@@ -164,16 +163,6 @@ static void del_event_cb(lv_event_t *e)
     s_pw[--s_len] = '\0';
     dial_haptics_play(HAPTIC_TICK);
     render_readout();
-}
-
-static void set_event_cb(lv_event_t *e)
-{
-    (void)e;
-    s_set = (s_set + 1) % 4;
-    s_pos = 0;   // a charset switch with the old offset kept would land on an
-                 // arbitrary, unrelated character in the new set
-    render_wheel();
-    dial_haptics_play(HAPTIC_TICK);
 }
 
 static void done_event_cb(lv_event_t *e)
@@ -216,9 +205,6 @@ static void apply_palette(void)
     lv_obj_set_style_border_color(s_del_btn, pal->track, 0);
     lv_obj_set_style_text_color(s_del_glyph, pal->ink_primary, 0);
 
-    lv_obj_set_style_bg_color(s_set_btn, pal->surface, 0);
-    lv_obj_set_style_border_color(s_set_btn, pal->track, 0);
-    lv_obj_set_style_text_color(s_set_lbl, pal->ink_primary, 0);
 
     lv_obj_set_style_bg_color(s_done_btn, pal->surface, 0);
     lv_obj_set_style_border_color(s_done_btn, pal->track, 0);
@@ -230,7 +216,6 @@ static void apply_palette(void)
 static void create(lv_obj_t *scr, void *arg)
 {
     s_idx = (int)(uintptr_t)arg;
-    s_set = 0;
     s_pos = 0;
     s_len = 0;
     memset(s_pw, 0, sizeof(s_pw));
@@ -303,28 +288,18 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_size(s_del_btn, 88, 88);
     lv_obj_set_style_radius(s_del_btn, 44, 0);
     lv_obj_set_style_border_width(s_del_btn, 1, 0);
-    lv_obj_align(s_del_btn, LV_ALIGN_CENTER, 80 - CX, 270 - CY);
+    lv_obj_align(s_del_btn, LV_ALIGN_CENTER, 124 - CX, 270 - CY);
     lv_obj_add_event_cb(s_del_btn, del_event_cb, LV_EVENT_CLICKED, NULL);
     s_del_glyph = lv_label_create(s_del_btn);
     lv_obj_set_style_text_font(s_del_glyph, &lv_font_montserrat_28, 0);
     lv_label_set_text(s_del_glyph, LV_SYMBOL_BACKSPACE);
     lv_obj_center(s_del_glyph);
 
-    s_set_btn = dial_btn_create(scr);
-    lv_obj_set_size(s_set_btn, 88, 88);
-    lv_obj_set_style_radius(s_set_btn, 44, 0);
-    lv_obj_set_style_border_width(s_set_btn, 1, 0);
-    lv_obj_align(s_set_btn, LV_ALIGN_CENTER, 0, 270 - CY);
-    lv_obj_add_event_cb(s_set_btn, set_event_cb, LV_EVENT_CLICKED, NULL);
-    s_set_lbl = lv_label_create(s_set_btn);
-    lv_obj_set_style_text_font(s_set_lbl, &lv_font_montserrat_16, 0);
-    lv_obj_center(s_set_lbl);
-
     s_done_btn = dial_btn_create(scr);
     lv_obj_set_size(s_done_btn, 88, 88);
     lv_obj_set_style_radius(s_done_btn, 44, 0);
     lv_obj_set_style_border_width(s_done_btn, 1, 0);
-    lv_obj_align(s_done_btn, LV_ALIGN_CENTER, 280 - CX, 270 - CY);
+    lv_obj_align(s_done_btn, LV_ALIGN_CENTER, 236 - CX, 270 - CY);
     lv_obj_add_event_cb(s_done_btn, done_event_cb, LV_EVENT_CLICKED, NULL);
     s_done_glyph = lv_label_create(s_done_btn);
     lv_obj_set_style_text_font(s_done_glyph, &lv_font_montserrat_28, 0);
@@ -351,7 +326,6 @@ static void destroy(void)
     s_cand_btn = NULL;
     s_slot_hair = NULL;
     s_del_btn = s_del_glyph = NULL;
-    s_set_btn = s_set_lbl = NULL;
     s_done_btn = s_done_glyph = NULL;
 }
 
@@ -368,7 +342,7 @@ static bool on_knob(int detents)
 {
     if (!s_cand_lbl || detents == 0) return false;
 
-    int n = (int)strlen(SETS[s_set]);
+    int n = (int)strlen(WHEEL);
     int np = s_pos + detents;
     if (np < 0)     np = 0;
     if (np > n - 1) np = n - 1;
