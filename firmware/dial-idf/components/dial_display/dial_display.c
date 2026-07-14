@@ -232,13 +232,60 @@ static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, 
     return false;
 }
 
+/*
+ * Screen rotation, in quarter turns clockwise (0..3).
+ *
+ * This panel cannot rotate: its driver rejects both mirror_y and swap_xy
+ * outright ("not supported by this panel"), so there is no MADCTL path — not
+ * even for a plain 180° flip. So the rotation is applied here, on the way to
+ * the panel: the flushed rectangle is remapped and its pixels re-ordered.
+ *
+ * That is cheap because a quarter turn is a REMAPPING, not a resample — every
+ * source pixel lands exactly on a destination pixel, nothing is interpolated,
+ * and the 88px numeral stays as crisp as it was drawn. (An arbitrary angle
+ * would need a real resample, which would smear the type and inflate every
+ * redraw's bounding box — the reason this stops at quarter turns.)
+ *
+ * The rounder above keeps x1/y1 even and x2/y2 odd, which the panel requires.
+ * A quarter turn preserves that: 359 - odd is even, and 359 - even is odd.
+ *
+ * 180° reverses the buffer in place. 90°/270° transpose, which needs somewhere
+ * to put the result, so a DMA-capable scratch buffer is allocated the first
+ * time one of those is selected.
+ */
+static uint8_t     s_rot;        // quarter turns clockwise
+static lv_color_t *s_rot_buf;    // transpose scratch (90/270 only)
+
+uint8_t dial_display_rotation(void) { return s_rot; }
+
+bool dial_display_set_rotation(uint8_t quarters)
+{
+    quarters &= 3;
+    if (quarters == s_rot) return true;
+
+    if ((quarters & 1) && !s_rot_buf) {
+        s_rot_buf = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t),
+                                     MALLOC_CAP_DMA);
+        if (!s_rot_buf) {
+            ESP_LOGE(TAG, "no DMA memory for the rotation buffer — staying at %d", s_rot * 90);
+            return false;
+        }
+    }
+    s_rot = quarters;
+    ESP_LOGI(TAG, "rotation: %d degrees", s_rot * 90);
+
+    // Everything on screen was composed for the old mapping; repaint it all.
+    if (lv_scr_act()) lv_obj_invalidate(lv_scr_act());
+    return true;
+}
+
 static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
-    const int offsetx1 = area->x1;
-    const int offsetx2 = area->x2;
-    const int offsety1 = area->y1;
-    const int offsety2 = area->y2;
+    int offsetx1 = area->x1;
+    int offsetx2 = area->x2;
+    int offsety1 = area->y1;
+    int offsety2 = area->y2;
 
 #if LCD_BIT_PER_PIXEL == 24
     uint8_t *to = (uint8_t *)color_map;
@@ -258,8 +305,49 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
     }
 #endif
 
+    // Rotate on the way out. W == H here (square panel), which is why 90/270
+    // need no resolution swap.
+    lv_color_t *out = color_map;
+    if (s_rot) {
+        const int W = EXAMPLE_LCD_H_RES, H = EXAMPLE_LCD_V_RES;
+        const int x1 = offsetx1, y1 = offsety1, x2 = offsetx2, y2 = offsety2;
+        const int w = x2 - x1 + 1, h = y2 - y1 + 1;
+
+        switch (s_rot) {
+        case 2:   // 180: (x,y) -> (W-1-x, H-1-y). Row-major order of the
+                  // destination is the source read backwards, so one reverse
+                  // of the buffer does it — no scratch needed.
+            offsetx1 = W - 1 - x2; offsetx2 = W - 1 - x1;
+            offsety1 = H - 1 - y2; offsety2 = H - 1 - y1;
+            for (int i = 0, j = w * h - 1; i < j; i++, j--) {
+                lv_color_t t = color_map[i];
+                color_map[i] = color_map[j];
+                color_map[j] = t;
+            }
+            break;
+
+        case 1:   // 90 CW: (x,y) -> (H-1-y, x). Destination is h wide, w tall.
+            offsetx1 = H - 1 - y2; offsetx2 = H - 1 - y1;
+            offsety1 = x1;         offsety2 = x2;
+            for (int j = 0; j < w; j++)
+                for (int i = 0; i < h; i++)
+                    s_rot_buf[j * h + i] = color_map[(h - 1 - i) * w + j];
+            out = s_rot_buf;
+            break;
+
+        default:  // 270 CW: (x,y) -> (y, W-1-x).
+            offsetx1 = y1;         offsetx2 = y2;
+            offsety1 = W - 1 - x2; offsety2 = W - 1 - x1;
+            for (int j = 0; j < w; j++)
+                for (int i = 0; i < h; i++)
+                    s_rot_buf[j * h + i] = color_map[i * w + (w - 1 - j)];
+            out = s_rot_buf;
+            break;
+        }
+    }
+
     // copy a buffer's content to a specific area of the display
-    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
+    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, out);
 }
 
 static void example_lvgl_rounder_cb(struct _lv_disp_drv_t *disp_drv, lv_area_t *area)
@@ -294,13 +382,29 @@ static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
         win = 0;   // swallowed: report released
     if (win)
     {
-        #ifdef EXAMPLE_Rotate_90
+        // The touch panel reports PHYSICAL coordinates, so undo the rotation
+        // the flush applies — otherwise a rotated UI would take taps at the
+        // place the pixels used to be. These are the exact inverses of the
+        // mappings in example_lvgl_flush_cb.
+        const int W = EXAMPLE_LCD_H_RES, H = EXAMPLE_LCD_V_RES;
+        switch (s_rot) {
+        case 1:   // flush: (x,y) -> (H-1-y, x)
             data->point.x = tp_y;
-            data->point.y = (EXAMPLE_LCD_V_RES - tp_x);
-        #else
+            data->point.y = H - 1 - tp_x;
+            break;
+        case 2:   // flush: (x,y) -> (W-1-x, H-1-y)
+            data->point.x = W - 1 - tp_x;
+            data->point.y = H - 1 - tp_y;
+            break;
+        case 3:   // flush: (x,y) -> (y, W-1-x)
+            data->point.x = W - 1 - tp_y;
+            data->point.y = tp_x;
+            break;
+        default:
             data->point.x = tp_x;
             data->point.y = tp_y;
-        #endif
+            break;
+        }
         if(data->point.x > EXAMPLE_LCD_H_RES)
         data->point.x = EXAMPLE_LCD_H_RES;
         if(data->point.y > EXAMPLE_LCD_V_RES)

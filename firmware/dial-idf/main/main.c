@@ -1295,7 +1295,18 @@ void app_main(void)
     // land straight on the portal QR, not replay the welcome splash.
     bool fresh = !dial_net_have_creds() && !dial_net_setup_requested();
     dial_state_commit(mut_fresh_device, &fresh);
-    dial_state_restore_prefs();   // last shown side (needs NVS, hence after net init)
+    dial_state_restore_prefs();   // last shown side + rotation (needs NVS, hence after net init)
+
+    // Apply the saved rotation to the panel. The store only remembers it; the
+    // display is what has to act on it.
+    {
+        app_state_t st;
+        dial_state_get(&st);
+        if (st.rotation && dial_display_lock(-1)) {
+            dial_display_set_rotation(st.rotation);
+            dial_display_unlock();
+        }
+    }
     dial_net_seed(WIFI_SSID, WIFI_PASSWORD);
     dial_state_commit(mut_ap_ssid, (void *)dial_net_ap_ssid());
 

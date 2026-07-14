@@ -38,12 +38,13 @@ void dial_state_restore_prefs(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
-    uint8_t zone = 0, units = 0, haptics = 1;
+    uint8_t zone = 0, units = 0, haptics = 1, rot = 0;
     bool have_zone    = nvs_get_u8(h, "zone", &zone) == ESP_OK && zone < ZONE_COUNT;
     bool have_units   = nvs_get_u8(h, "units", &units) == ESP_OK;
     bool have_haptics = nvs_get_u8(h, "haptics", &haptics) == ESP_OK;
+    bool have_rot     = nvs_get_u8(h, "rot", &rot) == ESP_OK && rot < 4;
     nvs_close(h);
-    if (!have_zone && !have_units && !have_haptics) return;
+    if (!have_zone && !have_units && !have_haptics && !have_rot) return;
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
     if (have_zone) {
@@ -55,8 +56,27 @@ void dial_state_restore_prefs(void)
     }
     if (have_units)   s_state.units_c        = (units != 0);
     if (have_haptics) s_state.haptics_enabled = (haptics != 0);
+    if (have_rot)     s_state.rotation        = rot;
     s_state.generation++;
     xSemaphoreGive(s_mux);
+}
+
+// Screen rotation, in quarter turns clockwise. Persisted here; actually applied
+// by dial_display_set_rotation (this store doesn't know about the panel).
+void dial_state_set_rotation(uint8_t quarters)
+{
+    quarters &= 3;
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.rotation = quarters;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "rot", quarters);
+        nvs_commit(h);
+        nvs_close(h);
+    }
 }
 
 /*

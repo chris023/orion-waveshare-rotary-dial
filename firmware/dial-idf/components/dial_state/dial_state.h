@@ -138,6 +138,10 @@ typedef struct {
     // always °C regardless), true = °C for display only. The arc range and
     // the knob's 1°F detent stay °F either way.
     bool units_c;
+    // Screen rotation in quarter turns clockwise (0..3), persisted. The dial
+    // sits on a nightstand and its cable exits one edge, so which way is "up"
+    // is a property of the room, not of the device.
+    uint8_t rotation;
     // Haptics master enable, mirrored here so screens can read the current
     // setting; dial_haptics_set_enabled() is the actual enforcement point.
     bool haptics_enabled;
@@ -227,6 +231,10 @@ void dial_state_set_units_c(bool units_c);
 // NOT itself call dial_haptics_set_enabled() — dial_state has no business
 // knowing about the haptics driver, so callers do both.
 void dial_state_set_haptics_enabled(bool enabled);
+
+// Screen rotation, quarter turns clockwise (0..3). Persisted; apply it to the
+// panel with dial_display_set_rotation.
+void dial_state_set_rotation(uint8_t quarters);
 
 // --- Input quiet-period gate (torn-read-safe on 32-bit) ---
 void    dial_state_stamp_input(void);   // call on EVERY user input

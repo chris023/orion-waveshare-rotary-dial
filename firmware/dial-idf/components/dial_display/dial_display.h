@@ -22,6 +22,16 @@ void dial_display_unlock(void);
 typedef bool (*dial_display_touch_filter_t)(bool pressed);
 void dial_display_set_touch_filter(dial_display_touch_filter_t filter);
 
+/*
+ * Screen rotation, in quarter turns clockwise (0..3). The panel itself cannot
+ * rotate (its driver rejects mirror_y and swap_xy), so this is applied in the
+ * flush path, and the touch coordinates are un-rotated to match. Call from the
+ * LVGL task (or before it starts). Returns false only if a 90/270 rotation
+ * couldn't get its DMA scratch buffer, in which case the rotation is unchanged.
+ */
+bool    dial_display_set_rotation(uint8_t quarters);
+uint8_t dial_display_rotation(void);
+
 #ifdef __cplusplus
 }
 #endif

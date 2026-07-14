@@ -14,6 +14,7 @@
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
 #include "dial_list.h"
+#include "dial_display.h"
 
 #define CY 180
 #define ROW_H          76
@@ -21,7 +22,7 @@
 
 static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
-static lv_obj_t *s_val_units, *s_val_haptics;
+static lv_obj_t *s_val_units, *s_val_haptics, *s_val_rotation;
 
 typedef enum { CONFIRM_RELINK = 0, CONFIRM_FACTORY, CONFIRM_COUNT } confirm_id_t;
 static lv_obj_t   *s_val_confirm[CONFIRM_COUNT];
@@ -109,6 +110,24 @@ static void row_back_cb(lv_event_t *e)
     ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
 }
 
+// Which way is "up" is a property of the room, not the device: the dial's cable
+// exits one edge, and on a nightstand that edge is as likely to point at the
+// bed as away from it. Cycles 0 -> 90 -> 180 -> 270 and applies immediately, so
+// the effect of the tap is the thing you're looking at.
+static void row_rotation_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    uint8_t next = (st.rotation + 1) & 3;
+    if (!dial_display_set_rotation(next)) {
+        dial_haptics_play(HAPTIC_ERROR);   // no memory for the 90/270 scratch buffer
+        return;
+    }
+    dial_state_set_rotation(next);
+    dial_haptics_play(HAPTIC_TICK);
+}
+
 static void row_units_cb(lv_event_t *e)
 {
     (void)e;
@@ -183,6 +202,7 @@ static void create(lv_obj_t *scr, void *arg)
     // changed nothing you couldn't change faster by swiping.
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
     make_row(s_list, "Units",         row_units_cb,         &s_val_units);
+    make_row(s_list, "Rotation",      row_rotation_cb,      &s_val_rotation);
     make_row(s_list, "Haptics",       row_haptics_cb,       &s_val_haptics);
     make_row(s_list, "Re-link Orion", row_relink_cb,        &s_val_confirm[CONFIRM_RELINK]);
     make_row(s_list, "Factory reset", row_factory_reset_cb, &s_val_confirm[CONFIRM_FACTORY]);
@@ -204,7 +224,7 @@ static void destroy(void)
     if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
     s_list = NULL;
     s_title_lbl = NULL;
-    s_val_units = s_val_haptics = NULL;
+    s_val_units = s_val_haptics = s_val_rotation = NULL;
     for (int i = 0; i < CONFIRM_COUNT; i++) s_val_confirm[i] = NULL;
     s_armed = CONFIRM_COUNT;
 }
@@ -213,6 +233,9 @@ static void on_state(const app_state_t *st)
 {
     if (!s_list) return;
     apply_palette(lv_obj_get_parent(s_list));
+
+    static const char *ROT[] = { "0\xC2\xB0", "90\xC2\xB0", "180\xC2\xB0", "270\xC2\xB0" };
+    lv_label_set_text(s_val_rotation, ROT[st->rotation & 3]);
 
     lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
     lv_label_set_text(s_val_haptics, st->haptics_enabled ? "On" : "Off");
