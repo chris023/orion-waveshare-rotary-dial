@@ -193,6 +193,11 @@ static void done_event_cb(lv_event_t *e)
     // rejected, nav_policy uses it to bring the user back here rather than to
     // the start of setup.
     dial_state_set_wifi_join(s_idx, dial_net_scan_ssid(s_idx));
+    // Move to the connecting phase NOW, not when the worker gets around to it a
+    // few hundred ms later — otherwise nav_policy (which still sees the portal
+    // phase in that gap) would bounce us back to the setup instructions for a
+    // beat before the connect attempt even starts.
+    dial_state_set_phase(PH_WIFI_CONNECTING, NULL);
     dial_net_submit_creds(dial_net_scan_ssid(s_idx), s_pw);
     ui_router_go(SCR_CONNECTING, NULL, LV_SCR_LOAD_ANIM_FADE_ON);
 }

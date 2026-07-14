@@ -144,12 +144,18 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
             *arg = (void *)(uintptr_t)st->wifi_join_idx;
             return SCR_PASSKEY;
         }
-        // Setting up on the dial (network list, password entry, and the wait
-        // while it connects) is a deliberate journey inside this phase — a
-        // routine state commit must not yank the user back to the instructions
-        // screen halfway through typing.
+        // Setting up on the dial (network list, password entry) is a deliberate
+        // journey inside this phase — a routine state commit must not yank the
+        // user back to the instructions screen halfway through typing.
+        //
+        // SCR_CONNECTING is deliberately NOT in this set: it is also the boot
+        // screen, so it is "current" every time the portal first comes up, and
+        // making it sticky here pinned the UI on "Connecting to Wi-Fi..." while
+        // the portal ran underneath, forever. The connect attempt shows the
+        // connecting screen through the PHASE instead (PH_WIFI_CONNECTING),
+        // which the passkey screen sets before it hands the credentials over.
         screen_id_t cur = ui_router_current();
-        if (cur == SCR_NETPICK || cur == SCR_PASSKEY || cur == SCR_CONNECTING) return cur;
+        if (cur == SCR_NETPICK || cur == SCR_PASSKEY) return cur;
         return SCR_WIFI_PORTAL;
     }
     case PH_OAUTH_WAIT_CONSENT: return SCR_OAUTH_QR;
@@ -1284,6 +1290,16 @@ static void net_event_cb(dial_net_event_t ev)
     switch (ev) {
     case DIAL_NET_EV_PORTAL:
         dial_state_set_phase(PH_WIFI_PORTAL, NULL);
+        break;
+    case DIAL_NET_EV_CONNECTING:
+        // Credentials accepted (from the web form OR the dial's own keypad) and
+        // a join is being attempted — move to the connecting phase so the
+        // connecting screen shows through nav_policy rather than through screen
+        // stickiness. Ignored once we're actually online, so a mid-session
+        // reconnect blip doesn't flash "Connecting to Wi-Fi" over the dial.
+        dial_state_get(&st);
+        if (st.phase == PH_WIFI_PORTAL || st.phase == PH_BOOT)
+            dial_state_set_phase(PH_WIFI_CONNECTING, NULL);
         break;
     case DIAL_NET_EV_SETUP_FAILED:
         // The credentials just submitted were rejected. nav_policy uses this to
