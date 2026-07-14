@@ -501,7 +501,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_label_set_text(s_pill_word, "--");
 
     // #11 Power disc.
-    s_power_btn = lv_btn_create(scr);
+    s_power_btn = dial_btn_create(scr);
     lv_obj_set_size(s_power_btn, 88, 88);
     lv_obj_set_style_radius(s_power_btn, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(s_power_btn, 2, 0);

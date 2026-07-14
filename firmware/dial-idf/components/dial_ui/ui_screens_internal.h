@@ -40,6 +40,25 @@ static inline zone_kind_t dial_zone_kind(const zone_state_t *z, bool device_onli
 }
 
 /*
+ * Every button on the dial is built here.
+ *
+ * LVGL's default theme hangs a grey drop shadow off every lv_btn, offset 4px
+ * DOWNWARD (lv_theme_default.c styles->btn: shadow_width 3, opa 50%, ofs_y 4).
+ * It's a material-style elevation cue that belongs to nothing else in this
+ * design language — on the dial's near-black ground it reads as a smudge under
+ * the power disc rather than as depth. Nothing here is meant to float above the
+ * face; the chassis is flat and state is carried by ring color, not elevation.
+ *
+ * Zeroing it per-button is how it got missed twice, so the constructor owns it.
+ */
+static inline lv_obj_t *dial_btn_create(lv_obj_t *parent)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    return btn;
+}
+
+/*
  * Page-dot row, shared by the dial faces and the menu face so the two can't
  * drift out of agreement about the chain.
  *

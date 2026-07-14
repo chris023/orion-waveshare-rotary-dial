@@ -165,7 +165,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_unit_lbl, LV_ALIGN_CENTER, 0, 214 - CY);
 
     // Start disc.
-    s_start_btn = lv_btn_create(scr);
+    s_start_btn = dial_btn_create(scr);
     lv_obj_set_size(s_start_btn, 88, 88);
     lv_obj_set_style_radius(s_start_btn, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(s_start_btn, 2, 0);

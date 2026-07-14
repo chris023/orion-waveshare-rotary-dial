@@ -215,11 +215,10 @@ static void create(lv_obj_t *scr, void *arg)
                       "The dial restarts and shows a QR code for joining its setup network.");
     lv_obj_align(s_confirm_body, LV_ALIGN_CENTER, 0, 126 - CY);
 
-    s_confirm_btn = lv_btn_create(s_confirm);
+    s_confirm_btn = dial_btn_create(s_confirm);
     lv_obj_set_size(s_confirm_btn, 200, 88);   // primary action: >=88px (round-screen DLS)
     lv_obj_set_style_radius(s_confirm_btn, 44, 0);
     lv_obj_set_style_border_width(s_confirm_btn, 1, 0);
-    lv_obj_set_style_shadow_width(s_confirm_btn, 0, 0);
     lv_obj_align(s_confirm_btn, LV_ALIGN_CENTER, 0, 210 - CY);
     lv_obj_add_event_cb(s_confirm_btn, confirm_btn_cb, LV_EVENT_CLICKED, NULL);
 
@@ -231,12 +230,11 @@ static void create(lv_obj_t *scr, void *arg)
     // Cancel sits below Continue as a quieter (transparent) pill: same 200px
     // width so the pair reads as one stack, and its rounded ends keep it clear
     // of the bezel at this y-band.
-    s_cancel_btn = lv_btn_create(s_confirm);
+    s_cancel_btn = dial_btn_create(s_confirm);
     lv_obj_set_size(s_cancel_btn, 200, 72);
     lv_obj_set_style_radius(s_cancel_btn, 36, 0);
     lv_obj_set_style_bg_opa(s_cancel_btn, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_cancel_btn, 1, 0);
-    lv_obj_set_style_shadow_width(s_cancel_btn, 0, 0);
     lv_obj_align(s_cancel_btn, LV_ALIGN_CENTER, 0, 302 - CY);
     lv_obj_add_event_cb(s_cancel_btn, cancel_btn_cb, LV_EVENT_CLICKED, NULL);
 

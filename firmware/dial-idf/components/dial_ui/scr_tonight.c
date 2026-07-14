@@ -381,11 +381,10 @@ static void create(lv_obj_t *scr, void *arg)
     // Back pill: 140x72 (>=72px target) centered at y=310 — a rounded pill
     // that size keeps every edge inside the round panel down there, and it
     // clears the chip above it.
-    s_back = lv_btn_create(scr);
+    s_back = dial_btn_create(scr);
     lv_obj_set_size(s_back, 140, 72);
     lv_obj_set_style_radius(s_back, 36, 0);
     lv_obj_set_style_border_width(s_back, 1, 0);
-    lv_obj_set_style_shadow_width(s_back, 0, 0);
     lv_obj_align(s_back, LV_ALIGN_CENTER, 0, 310 - CY);
     lv_obj_add_event_cb(s_back, back_event_cb, LV_EVENT_CLICKED, NULL);
 
