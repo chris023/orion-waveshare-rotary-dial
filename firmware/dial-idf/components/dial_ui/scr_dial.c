@@ -22,50 +22,7 @@ LV_FONT_DECLARE(dial_font_num_88)
 
 static lv_obj_t *s_arc;
 static lv_obj_t *s_stale_dot;
-
-/*
- * The water gauge (replaces the ghost ring). The arc is read as a vessel:
- *
- *   track      55..110, the whole range the bed can be asked for
- *   water      55..measured — where the water actually IS, a fact, so it is
- *              drawn in neutral ink and never in a state color
- *   band       the delta between the water and the target — the work the bed
- *              is doing right now, and the ONLY place the state accent appears
- *   crests     two short highlights travelling inside the band (the "current")
- *   bug        a radial tick at the target: what you asked for, always visible
- *              even when the band is empty (holding, or the zone switched off)
- *
- * Layering is decided per mode because the two modes mean different things:
- *
- *   HEATING  target is ABOVE the water. The band is the space the water has
- *            yet to rise into — disjoint from the water, translucent, with the
- *            crests running UP toward the target. Water draws on top, so its
- *            surface edge stays crisp.
- *   COOLING  target is BELOW the water. The band OVERLAPS the water: it is the
- *            heat that has to leave. So the band draws ON TOP of the water and
- *            eats into it, with the crests running DOWN toward the target.
- *
- * Every animation here is expressed as an ANGLE change, never a style change.
- * lv_arc invalidates only the swept sector on set_angles (inv_arc_area), while
- * any style/opa change invalidates the whole 330x330 arc object — that
- * distinction is the entire reason this is affordable and the design
- * competition's "breathing arc" was not (design-spec.md, D1 feasibility).
- */
-static lv_obj_t   *s_water_arc, *s_band, *s_crest[2], *s_bug;
-static lv_point_t  s_bug_pts[2];
-static lv_timer_t *s_flow_timer;
-static int32_t     s_flow_phase;
-
-// Cached across renders so a drag/detent can redraw the gauge without waiting
-// for a poll: the measured level and the state don't change while you turn.
-static float s_actual_f  = -1.0f;    // <0 = unknown
-static bool  s_zone_live = false;    // on + online: is there any work to show?
-static bool  s_flow_on   = false;    // crests running (real delta to close)
-static bool  s_flow_up   = true;     // true = heating (crests rise)
-static bool  s_flow_running, s_flow_night;
-static uint16_t s_band_a0, s_band_a1;
-static bool  s_layer_cooling, s_layer_known;
-
+static lv_obj_t *s_ghost;
 static lv_obj_t *s_name_lbl;
 static lv_obj_t *s_underline_solid, *s_underline_dash;
 static lv_obj_t *s_water_lbl;
@@ -179,165 +136,19 @@ static void chevron_stop(void)
     lv_obj_set_style_opa(s_pill_glyph, LV_OPA_100, 0);
 }
 
-/* ---- water gauge ------------------------------------------------------- */
-
-#define SWEEP_DEG 270          // the arc's own span (rotation 135, gap at 6 o'clock)
-#define CREST_LONG  16         // leading crest, degrees
-#define CREST_SHORT 10         // trailing crest — two speeds read as current, not a blip
-#define BAND_MIN_DEG 3         // below this the band is thinner than its own rounded caps
-
-// Temperature -> angle within the arc's own 0..270 sweep (rotation is added by
-// the widget). Same mapping the setpoint indicator has always used, so the bug,
-// the water level and the band all land on one scale.
-static uint16_t arc_angle(float f)
+/* ---- ghost ring (design-spec.md §4 #4, checklist item 6) --------------- */
+// Positioned by trig on the measured temp, same angle formula as the arc's
+// value mapping — this avoids a custom arc draw for a second "shadow" value.
+static void ghost_position(float actual_c)
 {
-    if (f < DIAL_TEMP_MIN_F) f = DIAL_TEMP_MIN_F;
-    if (f > DIAL_TEMP_MAX_F) f = DIAL_TEMP_MAX_F;
-    float d = SWEEP_DEG * (f - DIAL_TEMP_MIN_F) / (float)(DIAL_TEMP_MAX_F - DIAL_TEMP_MIN_F);
-    return (uint16_t)lroundf(d);
-}
-
-// The set bug: a radial tick across the ring at the target angle. Drawn in
-// ink-primary and never state-tinted — what you asked for is a fact, exactly
-// like the numeral (design-spec.md §9's "a numeral whose color never lies").
-static void bug_position(int target_f)
-{
-    float theta = (135.0f + arc_angle((float)target_f)) * 0.017453293f;
-    float c = cosf(theta), s = sinf(theta);
-    s_bug_pts[0] = (lv_point_t){ (lv_coord_t)lroundf(180 + (ARC_R - 12) * c),
-                                 (lv_coord_t)lroundf(180 + (ARC_R - 12) * s) };
-    s_bug_pts[1] = (lv_point_t){ (lv_coord_t)lroundf(180 + (ARC_R + 12) * c),
-                                 (lv_coord_t)lroundf(180 + (ARC_R + 12) * s) };
-    lv_line_set_points(s_bug, s_bug_pts, 2);
-}
-
-static void crests_hide(void)
-{
-    for (int i = 0; i < 2; i++)
-        if (s_crest[i]) lv_obj_add_flag(s_crest[i], LV_OBJ_FLAG_HIDDEN);
-}
-
-// Drives both crests from one 0..1000 phase. Each set_angles call invalidates
-// only the sector the crest just vacated/entered — a few degrees of ring, not
-// the whole widget. Crests are clipped at the band's far edge rather than
-// wrapped, so they visibly dissipate as they arrive: heating waves break at the
-// target, cooling waves drain into it.
-static void flow_phase_cb(void *var, int32_t p)
-{
-    (void)var;
-    if (!s_flow_on || !s_crest[0]) return;
-    int span = (int)s_band_a1 - (int)s_band_a0;
-    if (span < BAND_MIN_DEG) { crests_hide(); return; }
-
-    for (int i = 0; i < 2; i++) {
-        int32_t ph = (p + i * 500) % 1000;               // half a cycle apart
-        int len = i ? CREST_SHORT : CREST_LONG;
-        // Heating runs toward the high edge, cooling toward the low edge — the
-        // travel direction is a shape channel, so it still reads at night where
-        // the two accents are nearly the same hue.
-        int32_t t = s_flow_up ? ph : (1000 - ph);
-        int start = s_band_a0 + (span * (int)t) / 1000;
-        int end   = start + len;
-        if (end > (int)s_band_a1) end = s_band_a1;
-        if (start >= end - 1) { lv_obj_add_flag(s_crest[i], LV_OBJ_FLAG_HIDDEN); continue; }
-        lv_obj_clear_flag(s_crest[i], LV_OBJ_FLAG_HIDDEN);
-        lv_arc_set_angles(s_crest[i], (uint16_t)start, (uint16_t)end);
-    }
-}
-
-/*
- * The flow is driven by a TIMER, not an lv_anim, and this is a measured
- * decision rather than a stylistic one.
- *
- * An lv_anim steps once per display refresh. At that rate the two crests
- * re-cut their sectors ~30x/s, and because lv_arc invalidates the bounding BOX
- * of a swept sector (not the thin ring inside it), the worst-case band measured
- * 260 flushes/s and 3.1 Mpx/s on hardware — ~24 full frames of pixel throughput
- * per second, against a design budget (§6) that confines continuous motion to
- * an 18x18 glyph at ~10 kpx/s.
- *
- * Water doesn't need 30fps. A slow current reads as a current at 10fps, so the
- * phase advances on a 100ms timer instead, cutting the redraw rate by ~3x for
- * motion that looks the same. Re-measure with DIAL_FLUSH_STATS if this changes.
- */
-#define FLOW_TICK_MS 100
-
-static void flow_timer_cb(lv_timer_t *t)
-{
-    (void)t;
-    int32_t period_ticks = (s_flow_night ? 5200 : 2800) / FLOW_TICK_MS;
-    s_flow_phase = (s_flow_phase + 1000 / period_ticks) % 1000;
-    flow_phase_cb(NULL, s_flow_phase);
-}
-
-static void flow_start(bool night)
-{
-    s_flow_night = night;
-    if (s_flow_timer) return;                 // already running; the tick reads s_flow_night
-    s_flow_phase = 0;
-    s_flow_timer = lv_timer_create(flow_timer_cb, FLOW_TICK_MS, NULL);
-    s_flow_running = true;
-}
-
-static void flow_stop(void)
-{
-    if (s_flow_timer) { lv_timer_del(s_flow_timer); s_flow_timer = NULL; }
-    crests_hide();
-    s_flow_running = false;
-}
-
-// Lays the water / band / crest / bug stack out for one (target, measured)
-// pair. Called from on_state AND from every drag and detent, so the gauge
-// answers the knob immediately instead of waiting for the next poll.
-static void render_gauge(int target_f)
-{
-    if (!s_bug) return;
-    bug_position(target_f);
-
-    // No measurement (or nothing running): the level is all there is to show.
-    if (s_actual_f < 0 || !s_zone_live) {
-        lv_obj_add_flag(s_band, LV_OBJ_FLAG_HIDDEN);
-        s_flow_on = false;
-        flow_stop();
-        return;
-    }
-
-    uint16_t a_water  = arc_angle(s_actual_f);
-    uint16_t a_target = arc_angle((float)target_f);
-    bool cooling = a_target < a_water;
-
-    s_band_a0 = cooling ? a_target : a_water;
-    s_band_a1 = cooling ? a_water  : a_target;
-    s_flow_up = !cooling;
-
-    int span = (int)s_band_a1 - (int)s_band_a0;
-    if (span < BAND_MIN_DEG) {          // at target: nothing to work through
-        lv_obj_add_flag(s_band, LV_OBJ_FLAG_HIDDEN);
-        s_flow_on = false;
-        flow_stop();
-        return;
-    }
-
-    lv_obj_clear_flag(s_band, LV_OBJ_FLAG_HIDDEN);
-    lv_arc_set_angles(s_band, s_band_a0, s_band_a1);
-
-    // Per-mode stacking (see the header comment). Only re-order when the mode
-    // actually flips: lv_obj_move_foreground reshuffles children and forces a
-    // full invalidate, so it must not run on every render.
-    if (!s_layer_known || s_layer_cooling != cooling) {
-        if (cooling) lv_obj_move_foreground(s_band);        // the heat to shed, over the water
-        else         lv_obj_move_foreground(s_water_arc);   // water's surface stays crisp
-        for (int i = 0; i < 2; i++) lv_obj_move_foreground(s_crest[i]);
-        lv_obj_move_foreground(s_bug);                       // the bug is never buried
-        s_layer_cooling = cooling;
-        s_layer_known = true;
-    }
-
-    // Kept here rather than in the caller so a drag or a detent starts the
-    // current flowing the instant it opens a gap, without waiting for a poll.
-    s_flow_on = true;
-    bool night = dial_palette_is_night();
-    if (!s_flow_running || s_flow_night != night) flow_start(night);
+    if (actual_c < 0) { lv_obj_add_flag(s_ghost, LV_OBJ_FLAG_HIDDEN); return; }
+    lv_obj_clear_flag(s_ghost, LV_OBJ_FLAG_HIDDEN);
+    int f = dial_c_to_f(actual_c);
+    float theta_deg = 135.0f + 270.0f * (float)(f - DIAL_TEMP_MIN_F) / (float)(DIAL_TEMP_MAX_F - DIAL_TEMP_MIN_F);
+    float theta = theta_deg * 0.017453293f;   // deg -> rad
+    int dx = (int)lroundf(ARC_R * cosf(theta));
+    int dy = (int)lroundf(ARC_R * sinf(theta));
+    lv_obj_align(s_ghost, LV_ALIGN_CENTER, dx, dy);
 }
 
 /* ---- identity underline (design-spec.md §4 #6, §8) --------------------- */
@@ -383,50 +194,20 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_t *scr = lv_obj_get_parent(s_arc);   // s_arc's parent is the screen
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
-    // Range track. The interactive arc's own indicator stays transparent: it
-    // still owns the drag (its value IS the setpoint), but the water gauge
-    // below draws everything the user actually reads.
+    // Arc track + indicator (design-spec.md §4 #2-3).
     lv_obj_set_style_arc_color(s_arc, pal->track, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(s_arc, LV_OPA_70, LV_PART_MAIN);
-    lv_obj_set_style_arc_opa(s_arc, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_arc, arc_accent, LV_PART_INDICATOR);
+    lv_opa_t indic_opa = relief ? LV_OPA_COVER
+                        : (kind == ZK_OFFLINE) ? LV_OPA_TRANSP
+                        : (kind == ZK_STANDBY) ? LV_OPA_30 : LV_OPA_COVER;
+    lv_obj_set_style_arc_opa(s_arc, indic_opa, LV_PART_INDICATOR);
 
-    // ---- water gauge ----
-    s_actual_f  = (z->actual_c >= 0) ? (dial_c_to_f(z->actual_c) * 1.0f) : -1.0f;
-    s_zone_live = (kind != ZK_OFFLINE) && (kind != ZK_STANDBY);
-
-    // The water level is a measurement, so it is drawn in neutral ink — the
-    // one thing on this arc that is never state-tinted. Off/offline it stays
-    // visible but recedes; there is still water in the bed when it's idle.
-    lv_opa_t water_opa = (kind == ZK_OFFLINE) ? LV_OPA_20
-                       : (kind == ZK_STANDBY) ? LV_OPA_30 : LV_OPA_50;
-    lv_obj_set_style_arc_color(s_water_arc, pal->ink_secondary, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_opa(s_water_arc, water_opa, LV_PART_INDICATOR);
-    if (s_actual_f < 0) {
-        lv_obj_add_flag(s_water_arc, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_clear_flag(s_water_arc, LV_OBJ_FLAG_HIDDEN);
-        uint16_t a_water = arc_angle(s_actual_f);
-        // A level of exactly 0° would render as a stub of rounded cap, so keep
-        // a floor of 1° — "there is water, and it is cold" still reads.
-        lv_arc_set_angles(s_water_arc, 0, a_water < 1 ? 1 : a_water);
-    }
-
-    // The band and its crests are the only state color on the ring. Heating
-    // sits ahead of the water (translucent — space still to fill); cooling
-    // overlays it (heavier — heat that has to leave).
-    bool cooling_now = (s_actual_f >= 0) && (arc_angle((float)s_shown_f) < arc_angle(s_actual_f));
-    lv_obj_set_style_arc_color(s_band, arc_accent, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_opa(s_band, cooling_now ? LV_OPA_80 : LV_OPA_60, LV_PART_INDICATOR);
-    for (int i = 0; i < 2; i++) {
-        lv_obj_set_style_arc_color(s_crest[i], arc_accent, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_opa(s_crest[i], i ? LV_OPA_60 : LV_OPA_COVER, LV_PART_INDICATOR);
-    }
-
-    // The set bug — ink-primary, dimmed only when offline, exactly like the numeral.
-    lv_obj_set_style_line_color(s_bug, pal->ink_primary, 0);
-    lv_obj_set_style_line_opa(s_bug, (kind == ZK_OFFLINE) ? 115 : LV_OPA_COVER, 0);
-
-    render_gauge(s_shown_f);
+    // Ghost ring (measured temp).
+    lv_opa_t ghost_opa = night ? 115 /* ~45% */ : LV_OPA_50;
+    lv_obj_set_style_border_color(s_ghost, pal->ink_secondary, 0);
+    lv_obj_set_style_border_opa(s_ghost, ghost_opa, 0);
+    ghost_position(z->actual_c);
 
     // Side name + identity underline.
     lv_obj_set_style_text_color(s_name_lbl, pal->ink_secondary, 0);
@@ -566,11 +347,7 @@ static void arc_event_cb(lv_event_t *e)
     lv_obj_t *arc = lv_event_get_target(e);
     int f = lv_arc_get_value(arc);
     if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
-        // Live feedback while dragging: the numeral AND the gauge, so the band
-        // opens and the current starts flowing under the finger.
-        s_shown_f = f;
-        if (s_temp_lbl) render_numeral(f);
-        render_gauge(f);
+        if (s_temp_lbl) render_numeral(f);          // live feedback while dragging
     } else {                                          // LV_EVENT_RELEASED
         post_temp_for((zone_idx_t)(uintptr_t)lv_event_get_user_data(e), f);
     }
@@ -635,38 +412,14 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_VALUE_CHANGED, (void *)(uintptr_t)s_zone);
     lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)s_zone);
 
-    // #4 Water gauge. Four passive arcs sharing the interactive arc's geometry
-    // (same center, radius, rotation and sweep) so every layer lands on one
-    // scale. None of them take touch — the arc above owns that.
-    struct { lv_obj_t **obj; lv_coord_t w; } layer[] = {
-        { &s_water_arc, 16 },   // the measured level
-        { &s_band,      16 },   // the delta being worked through
-        { &s_crest[0],  10 },   // crests are narrower so they read as highlights
-        { &s_crest[1],  10 },   // riding INSIDE the band, not as more band
-    };
-    for (size_t i = 0; i < sizeof(layer) / sizeof(layer[0]); i++) {
-        lv_obj_t *a = lv_arc_create(scr);
-        lv_obj_set_size(a, 2 * ARC_R, 2 * ARC_R);
-        lv_obj_center(a);
-        lv_arc_set_rotation(a, 135);
-        lv_arc_set_bg_angles(a, 0, SWEEP_DEG);
-        lv_arc_set_angles(a, 0, 0);
-        lv_obj_set_style_arc_opa(a, LV_OPA_TRANSP, LV_PART_MAIN);     // no second track
-        lv_obj_set_style_arc_width(a, layer[i].w, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_rounded(a, true, LV_PART_INDICATOR);
-        lv_obj_set_style_bg_opa(a, LV_OPA_TRANSP, LV_PART_KNOB);
-        lv_obj_remove_style(a, NULL, LV_PART_KNOB);
-        lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(a, LV_OBJ_FLAG_HIDDEN);
-        *layer[i].obj = a;
-    }
-
-    // The set bug: a radial tick across the ring at the target.
-    s_bug = lv_line_create(scr);
-    lv_obj_set_style_line_width(s_bug, 3, 0);
-    lv_obj_set_style_line_rounded(s_bug, true, 0);
-    lv_obj_clear_flag(s_bug, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    bug_position((DIAL_TEMP_MIN_F + DIAL_TEMP_MAX_F) / 2);
+    // #4 Ghost ring.
+    s_ghost = lv_obj_create(scr);
+    lv_obj_set_size(s_ghost, 10, 10);
+    lv_obj_set_style_radius(s_ghost, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(s_ghost, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_ghost, 2, 0);
+    lv_obj_clear_flag(s_ghost, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_ghost, LV_ALIGN_CENTER, 0, -ARC_R);   // parked at top until first on_state
 
     // #5 Side name.
     s_name_lbl = lv_label_create(scr);
@@ -812,14 +565,8 @@ static void destroy(void)
     if (s_pill_glyph) lv_anim_del(s_pill_glyph, NULL);
     if (s_stale_dot)  lv_anim_del(s_stale_dot, NULL);
     if (s_boost_timer) { lv_timer_del(s_boost_timer); s_boost_timer = NULL; }
-    if (s_flow_timer)  { lv_timer_del(s_flow_timer);  s_flow_timer = NULL; }
 
-    s_water_arc = s_band = s_crest[0] = s_crest[1] = s_bug = NULL;
-    s_flow_on = s_flow_running = false;
-    s_layer_known = false;
-    s_actual_f = -1.0f;
-
-    s_arc = s_stale_dot = s_name_lbl = NULL;
+    s_arc = s_stale_dot = s_ghost = s_name_lbl = NULL;
     s_underline_solid = s_underline_dash = s_water_lbl = NULL;
     s_num_box = s_temp_lbl = s_unit_lbl = NULL;
     s_pill = s_pill_glyph = s_pill_word = NULL;
@@ -846,16 +593,13 @@ static void on_state(const app_state_t *st)
     if (!s_arc || !st->have_state) return;
     const zone_state_t *z = &st->zones[s_zone];
 
-    // Optimistic intent wins while set; otherwise follow the device. Resolved
-    // BEFORE apply_palette_and_state, because that renders the water gauge off
-    // s_shown_f — reading a stale target would leave the band a poll behind.
-    int f = (st->ui_temp_f[s_zone] >= 0) ? st->ui_temp_f[s_zone] : dial_c_to_f(z->temp_c);
-    s_shown_f = f;
-
-    // Sets s_units_c (among other things) before render_numeral below reads it
-    // — otherwise a units toggle would render one call stale.
+    // Runs first: sets s_units_c (among other things) before render_numeral
+    // below reads it — otherwise a units toggle would render one call stale.
     apply_palette_and_state(st);
 
+    // Optimistic intent wins while set; otherwise follow the device.
+    int f = (st->ui_temp_f[s_zone] >= 0) ? st->ui_temp_f[s_zone] : dial_c_to_f(z->temp_c);
+    s_shown_f = f;
     lv_arc_set_value(s_arc, f);
     render_numeral(f);
 
@@ -892,9 +636,7 @@ static bool on_knob(int detents)
     }
 
     lv_arc_set_value(s_arc, nf);
-    s_shown_f = nf;
     render_numeral(nf);
-    render_gauge(nf);
     anim_zoom_bump(s_temp_lbl);
     post_temp(nf);
     return true;
