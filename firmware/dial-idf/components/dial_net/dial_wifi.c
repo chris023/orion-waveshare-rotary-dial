@@ -445,6 +445,11 @@ static esp_err_t root_get(httpd_req_t *req)
         "input,select,button{width:100%;padding:12px;margin:6px 0;font-size:16px;box-sizing:border-box;"
         "border:1px solid #ccc;border-radius:8px}"
         "button{background:#0b6;color:#fff;border:0;margin-top:18px;font-weight:600}"
+        // The rescan is a secondary action: an outlined button so it reads as a
+        // real control (a text link went unnoticed) without competing with the
+        // green Connect button.
+        "a.rescan{display:block;text-align:center;text-decoration:none;padding:10px;margin:8px 0;"
+        "font-size:15px;font-weight:600;color:#0b6;border:1px solid #0b6;border-radius:8px}"
         ".hint{color:#888;font-size:13px}"
         "#otherwrap{display:none}"
         "</style></head><body>"
@@ -466,6 +471,10 @@ static esp_err_t root_get(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "<option value='__other__'>My network isn't listed&hellip;</option>"
         "</select>"
+        // The rescan sits right under the list it refreshes, where "I don't see
+        // mine" is the thought. It's a plain link (a GET), not part of the form,
+        // so it can't submit the password fields — it just re-renders the page.
+        "<a class=rescan href='/rescan'>&#x21bb; Refresh network list</a>"
         "<div id=otherwrap>"
         "<label for=other>Network name</label>"
         "<input name=other id=other placeholder='Exact name, including capitals'>"
@@ -477,7 +486,6 @@ static esp_err_t root_get(httpd_req_t *req)
         "<button type=submit>Connect</button></form>"
         "<p class=hint>The dial's setup network disappears as soon as it starts connecting &mdash; "
         "that's expected, and your phone will drop back to its usual Wi-Fi.</p>"
-        "<p><a href='/rescan' style='color:#0b6;font-size:13px'>Rescan for networks</a></p>"
         "</body></html>");
     httpd_resp_sendstr_chunk(req, NULL);
     return ESP_OK;

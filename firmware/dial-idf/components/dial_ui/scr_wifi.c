@@ -11,12 +11,12 @@
  * label tap-twice pattern the destructive Settings rows use: at Mont 16 the
  * "tap again" prompt collided with the Mont 24 row label (owner saw
  * overlapping text), and this action deserves a sentence of explanation
- * anyway — it reboots the dial into the SoftAP portal, where scr_setup's QR
- * gets the phone onto the setup network. The command that gets it there is
- * CMD_WIFI_RESET -> dial_net_request_setup(), which BOTH forgets the creds and
- * latches a flag: forgetting alone was not enough, because the dev seed would
- * re-inject the build's own network on the next boot and the dial would
- * silently rejoin it (the bug the owner hit — "it just resets the unit").
+ * anyway — it reboots the dial into setup mode (see scr_setup / scr_netpick).
+ * The command that gets it there is CMD_WIFI_RESET -> dial_net_request_setup(),
+ * which BOTH forgets the creds and latches a flag: forgetting alone was not
+ * enough, because the dev seed would re-inject the build's own network on the
+ * next boot and the dial would silently rejoin it (the bug the owner hit — "it
+ * just resets the unit").
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
@@ -212,7 +212,8 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_text_font(s_confirm_body, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_align(s_confirm_body, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_confirm_body,
-                      "The dial restarts and shows a QR code for joining its setup network.");
+                      "The dial restarts into setup, where you can choose a new "
+                      "network on the dial or from your phone.");
     lv_obj_align(s_confirm_body, LV_ALIGN_CENTER, 0, 126 - CY);
 
     s_confirm_btn = dial_btn_create(s_confirm);
