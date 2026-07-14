@@ -22,7 +22,47 @@ LV_FONT_DECLARE(dial_font_num_88)
 
 static lv_obj_t *s_arc;
 static lv_obj_t *s_stale_dot;
-static lv_obj_t *s_ghost;
+
+/*
+ * Water level: three wavy lines running along the arc band, from the bottom of
+ * the range up to the measured water temperature. Stripes, not a fill — the
+ * gaps are transparent, so whatever is behind shows through them.
+ *
+ * The END OF THE TEXTURE IS THE WATER LEVEL, in both directions, and where it
+ * lands relative to the solid set-to fill is what tells you which way the bed
+ * is working:
+ *
+ *   HEATING  water is below the setpoint, so the stripes run OVER the accent
+ *            fill and stop short of its end. Textured = real water; the smooth
+ *            accent beyond it = the heat still to add. Drawn in `bg`, so they
+ *            read as grooves cut into the fill.
+ *   COOLING  water is above the setpoint, so the stripes carry on PAST the end
+ *            of the fill, over the bare track. Drawn in `ink_secondary`, so
+ *            they read as water sitting over the empty part of the range.
+ *
+ * The stripe color has to flip with the mode because the two backgrounds are at
+ * opposite ends of the value scale — no single color contrasts with both the
+ * bright accent fill and the near-black track, and at night it's worse, where
+ * ink-primary and accent-heat are both ember.
+ *
+ * Below the setpoint in COOLING the stripes would be hidden under the opaque
+ * fill anyway, so those points simply aren't generated: the track and the fill
+ * are two PARTS of one lv_arc, so there is no z-slot between them to sit in,
+ * and clipping the range produces exactly the same pixels as being behind it.
+ *
+ * Static by design. Recomputed only when a poll moves the water or the user
+ * moves the target — nothing animates, so this costs nothing at rest.
+ */
+#define WAVE_LINES     3
+#define WAVE_STEP_DEG  3
+#define WAVE_MAX_PTS   (270 / WAVE_STEP_DEG + 2)
+#define WAVE_AMPL      2.0f     // radial undulation, px
+#define WAVE_PERIOD    30.0f    // degrees of arc per ripple
+
+static lv_obj_t  *s_wave[WAVE_LINES];
+static lv_point_t s_wave_pts[WAVE_LINES][WAVE_MAX_PTS];
+static float      s_actual_f = -1.0f;   // measured water temp, °F; <0 = unknown
+
 static lv_obj_t *s_name_lbl;
 static lv_obj_t *s_underline_solid, *s_underline_dash;
 static lv_obj_t *s_water_lbl;
@@ -136,19 +176,63 @@ static void chevron_stop(void)
     lv_obj_set_style_opa(s_pill_glyph, LV_OPA_100, 0);
 }
 
-/* ---- ghost ring (design-spec.md §4 #4, checklist item 6) --------------- */
-// Positioned by trig on the measured temp, same angle formula as the arc's
-// value mapping — this avoids a custom arc draw for a second "shadow" value.
-static void ghost_position(float actual_c)
+/* ---- water level: wavy stripes along the band -------------------------- */
+
+// Temperature -> degrees into the arc's own 0..270 sweep (rotation adds 135).
+static float wave_angle(float f)
 {
-    if (actual_c < 0) { lv_obj_add_flag(s_ghost, LV_OBJ_FLAG_HIDDEN); return; }
-    lv_obj_clear_flag(s_ghost, LV_OBJ_FLAG_HIDDEN);
-    int f = dial_c_to_f(actual_c);
-    float theta_deg = 135.0f + 270.0f * (float)(f - DIAL_TEMP_MIN_F) / (float)(DIAL_TEMP_MAX_F - DIAL_TEMP_MIN_F);
-    float theta = theta_deg * 0.017453293f;   // deg -> rad
-    int dx = (int)lroundf(ARC_R * cosf(theta));
-    int dy = (int)lroundf(ARC_R * sinf(theta));
-    lv_obj_align(s_ghost, LV_ALIGN_CENTER, dx, dy);
+    if (f < DIAL_TEMP_MIN_F) f = DIAL_TEMP_MIN_F;
+    if (f > DIAL_TEMP_MAX_F) f = DIAL_TEMP_MAX_F;
+    return 270.0f * (f - DIAL_TEMP_MIN_F) / (float)(DIAL_TEMP_MAX_F - DIAL_TEMP_MIN_F);
+}
+
+static void waves_hide(void)
+{
+    for (int i = 0; i < WAVE_LINES; i++)
+        if (s_wave[i]) lv_obj_add_flag(s_wave[i], LV_OBJ_FLAG_HIDDEN);
+}
+
+static void waves_render(int target_f)
+{
+    if (!s_wave[0]) return;
+    if (s_actual_f < 0) { waves_hide(); return; }     // no measurement yet
+
+    const dial_palette_t *pal = PAL();
+    float a_water = wave_angle(s_actual_f);
+    float a_set   = wave_angle((float)target_f);
+    bool  cooling = a_water > a_set;
+
+    // Heating draws from the bottom of the range; cooling starts at the set
+    // fill's edge, because everything below it is behind an opaque fill.
+    float a_lo = cooling ? a_set : 0.0f;
+    float a_hi = a_water;
+    if (a_hi - a_lo < 4.0f) { waves_hide(); return; }  // thinner than the ripple itself
+
+    lv_color_t c = cooling ? pal->ink_secondary : pal->bg;
+    lv_opa_t  opa = cooling ? LV_OPA_80 : LV_OPA_70;
+
+    for (int i = 0; i < WAVE_LINES; i++) {
+        float base_r = ARC_R - 5.0f + 5.0f * i;        // 160 / 165 / 170, inside the 16px band
+        float phase  = i * 2.1f;                        // offset so the three don't ripple in lockstep
+        int n = 0;
+        for (float a = a_lo; a < a_hi && n < WAVE_MAX_PTS - 1; a += WAVE_STEP_DEG) {
+            float th = (135.0f + a) * 0.017453293f;
+            float rr = base_r + WAVE_AMPL * sinf(a * (6.2831853f / WAVE_PERIOD) + phase);
+            s_wave_pts[i][n++] = (lv_point_t){ (lv_coord_t)lroundf(180.0f + rr * cosf(th)),
+                                               (lv_coord_t)lroundf(180.0f + rr * sinf(th)) };
+        }
+        // Land the last point exactly on the water level, so the texture ends
+        // where the measurement says it does rather than at the last 3° step.
+        float th = (135.0f + a_hi) * 0.017453293f;
+        float rr = base_r + WAVE_AMPL * sinf(a_hi * (6.2831853f / WAVE_PERIOD) + phase);
+        s_wave_pts[i][n++] = (lv_point_t){ (lv_coord_t)lroundf(180.0f + rr * cosf(th)),
+                                           (lv_coord_t)lroundf(180.0f + rr * sinf(th)) };
+
+        lv_line_set_points(s_wave[i], s_wave_pts[i], n);
+        lv_obj_set_style_line_color(s_wave[i], c, 0);
+        lv_obj_set_style_line_opa(s_wave[i], opa, 0);
+        lv_obj_clear_flag(s_wave[i], LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /* ---- identity underline (design-spec.md §4 #6, §8) --------------------- */
@@ -203,11 +287,12 @@ static void apply_palette_and_state(const app_state_t *st)
                         : (kind == ZK_STANDBY) ? LV_OPA_30 : LV_OPA_COVER;
     lv_obj_set_style_arc_opa(s_arc, indic_opa, LV_PART_INDICATOR);
 
-    // Ghost ring (measured temp).
-    lv_opa_t ghost_opa = night ? 115 /* ~45% */ : LV_OPA_50;
-    lv_obj_set_style_border_color(s_ghost, pal->ink_secondary, 0);
-    lv_obj_set_style_border_opa(s_ghost, ghost_opa, 0);
-    ghost_position(z->actual_c);
+    // Water level (replaces the ghost ring): wavy stripes up to the measured
+    // temp. Cached in °F so a drag or a detent can re-lay them without waiting
+    // for the next poll — the water doesn't move while you turn the knob, but
+    // the setpoint does, and that's what decides the mode and the start angle.
+    s_actual_f = (z->actual_c >= 0) ? (float)dial_c_to_f(z->actual_c) : -1.0f;
+    waves_render(s_shown_f);
 
     // Side name + identity underline.
     lv_obj_set_style_text_color(s_name_lbl, pal->ink_secondary, 0);
@@ -347,7 +432,12 @@ static void arc_event_cb(lv_event_t *e)
     lv_obj_t *arc = lv_event_get_target(e);
     int f = lv_arc_get_value(arc);
     if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
-        if (s_temp_lbl) render_numeral(f);          // live feedback while dragging
+        // Live feedback while dragging. The stripes move too: dragging the
+        // target past the water level flips heating<->cooling, which changes
+        // both where they start and what color they are.
+        s_shown_f = f;
+        if (s_temp_lbl) render_numeral(f);
+        waves_render(f);
     } else {                                          // LV_EVENT_RELEASED
         post_temp_for((zone_idx_t)(uintptr_t)lv_event_get_user_data(e), f);
     }
@@ -412,14 +502,19 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_VALUE_CHANGED, (void *)(uintptr_t)s_zone);
     lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)s_zone);
 
-    // #4 Ghost ring.
-    s_ghost = lv_obj_create(scr);
-    lv_obj_set_size(s_ghost, 10, 10);
-    lv_obj_set_style_radius(s_ghost, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(s_ghost, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(s_ghost, 2, 0);
-    lv_obj_clear_flag(s_ghost, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(s_ghost, LV_ALIGN_CENTER, 0, -ARC_R);   // parked at top until first on_state
+    // #4 Water level: three wavy stripes over the band. Created after the arc
+    // so they sit above it — in COOLING the stripes that would fall under the
+    // set fill simply aren't generated (see waves_render), which is why this
+    // needs no per-mode re-ordering. Points are absolute screen coords, so the
+    // objects are pinned at the screen origin.
+    for (int i = 0; i < WAVE_LINES; i++) {
+        s_wave[i] = lv_line_create(scr);
+        lv_obj_set_pos(s_wave[i], 0, 0);
+        lv_obj_set_style_line_width(s_wave[i], 2, 0);
+        lv_obj_set_style_line_rounded(s_wave[i], true, 0);
+        lv_obj_clear_flag(s_wave[i], LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(s_wave[i], LV_OBJ_FLAG_HIDDEN);   // until the first measurement
+    }
 
     // #5 Side name.
     s_name_lbl = lv_label_create(scr);
@@ -566,7 +661,10 @@ static void destroy(void)
     if (s_stale_dot)  lv_anim_del(s_stale_dot, NULL);
     if (s_boost_timer) { lv_timer_del(s_boost_timer); s_boost_timer = NULL; }
 
-    s_arc = s_stale_dot = s_ghost = s_name_lbl = NULL;
+    for (int i = 0; i < WAVE_LINES; i++) s_wave[i] = NULL;
+    s_actual_f = -1.0f;
+
+    s_arc = s_stale_dot = s_name_lbl = NULL;
     s_underline_solid = s_underline_dash = s_water_lbl = NULL;
     s_num_box = s_temp_lbl = s_unit_lbl = NULL;
     s_pill = s_pill_glyph = s_pill_word = NULL;
@@ -593,13 +691,16 @@ static void on_state(const app_state_t *st)
     if (!s_arc || !st->have_state) return;
     const zone_state_t *z = &st->zones[s_zone];
 
-    // Runs first: sets s_units_c (among other things) before render_numeral
-    // below reads it — otherwise a units toggle would render one call stale.
-    apply_palette_and_state(st);
-
-    // Optimistic intent wins while set; otherwise follow the device.
+    // Optimistic intent wins while set; otherwise follow the device. Resolved
+    // BEFORE apply_palette_and_state, which lays the water stripes out against
+    // s_shown_f — reading a stale target there would leave them a poll behind.
     int f = (st->ui_temp_f[s_zone] >= 0) ? st->ui_temp_f[s_zone] : dial_c_to_f(z->temp_c);
     s_shown_f = f;
+
+    // Sets s_units_c (among other things) before render_numeral below reads it
+    // — otherwise a units toggle would render one call stale.
+    apply_palette_and_state(st);
+
     lv_arc_set_value(s_arc, f);
     render_numeral(f);
 
@@ -636,7 +737,9 @@ static bool on_knob(int detents)
     }
 
     lv_arc_set_value(s_arc, nf);
+    s_shown_f = nf;
     render_numeral(nf);
+    waves_render(nf);
     anim_zoom_bump(s_temp_lbl);
     post_temp(nf);
     return true;
