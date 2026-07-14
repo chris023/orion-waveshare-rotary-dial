@@ -46,6 +46,16 @@ static const char *TAG = "app";
 // (so an update can never land mid-interaction).
 #define KNOB_SETTLE_US    2500000    // 2.5s of no input before the bed is read back
 #define POLL_INTERVAL_US 10000000    // and at most every ~10s when idle
+/*
+ * ...but the interval is not one number. Right after a write the device is the
+ * thing that's changing (the bed takes a few seconds to actually start heating
+ * or cooling), so a 10s cadence means the dial insists nothing is happening
+ * long after the user can hear the pump. Poll hard for a few rounds, then fall
+ * back to idle cadence. The quiet gate above still holds the whole time, so a
+ * knob spin is never interrupted by a read.
+ */
+#define POLL_CONFIRM_US   2000000    // 2s between the confirm polls after a write
+#define POLL_CONFIRM_N          3    // how many of them before returning to idle cadence
 
 // Sleep schedules (M5) don't change minute to minute — refresh far less
 // often than device state, piggybacked on the same idle poll path.
@@ -186,6 +196,14 @@ typedef struct {
 static void mut_device_state(app_state_t *st, void *arg)
 {
     device_snapshot_t *d = arg;
+    // A response that LEFT the device before the user's last input cannot know
+    // about what they just did. Taking its control fields (on / setpoint /
+    // thermal_state) would visibly undo the optimistic update for a beat and
+    // then redo it on the following poll — the "jumpy" flicker after a tap or a
+    // knob turn. Its telemetry (measured water, safety, fill) is still good:
+    // the user's input didn't change those, so only the control state is held.
+    bool predates_input = dial_state_last_input_us() > d->poll_started_us;
+
     for (int z = 0; z < ZONE_COUNT; z++) {
         // Two things about a zone don't come from THIS call and must survive
         // it: the name (list_devices) and the M5 sleep-schedule fields
@@ -202,6 +220,13 @@ static void mut_device_state(app_state_t *st, void *arg)
         st->zones[z].sched_wakeup_temp_c        = keep.sched_wakeup_temp_c;
         st->zones[z].sched_override_available   = keep.sched_override_available;
         st->zones[z].sched_override_applied     = keep.sched_override_applied;
+
+        if (predates_input) {                       // see the note above
+            st->zones[z].on     = keep.on;
+            st->zones[z].temp_c = keep.temp_c;
+            strlcpy(st->zones[z].thermal_state, keep.thermal_state,
+                    sizeof(st->zones[z].thermal_state));
+        }
     }
     for (int z = 0; z < ZONE_COUNT; z++) st->zone_present[z] = d->present[z];
     // A single-zone topper has no partner face to show. If the persisted side
@@ -216,11 +241,9 @@ static void mut_device_state(app_state_t *st, void *arg)
     strlcpy(st->water_fill, d->water_fill, sizeof(st->water_fill));
     st->have_state = true;
     // Clear optimistic intent ONLY if no input arrived after this poll's
-    // round-trip began: the response predates any newer knob turn, and truth
-    // from before the user's input must not clobber what they just asked for.
-    // (The failed-write case still converges: the next quiet-period poll runs
-    // with no newer input and clears the stale intent.)
-    if (dial_state_last_input_us() <= d->poll_started_us)
+    // round-trip began (the failed-write case still converges: the next
+    // quiet-period poll runs with no newer input and clears the stale intent).
+    if (!predates_input)
         for (int z = 0; z < ZONE_COUNT; z++)
             st->ui_temp_f[z] = -1;
 }
@@ -235,11 +258,35 @@ static void mut_identity(app_state_t *st, void *arg)
     strlcpy(st->serial, n->serial, sizeof(st->serial));
 }
 
+/*
+ * thermal_state is device truth and only arrives on a poll — so a zone the user
+ * has just switched on keeps rendering the "standby"/"holding" it had before,
+ * and the dial insists nothing is happening while the bed is visibly spinning
+ * up. Predict it instead from the two things we already know: where the water
+ * is, and where they just asked it to go. The next poll overwrites this with
+ * the truth, so a wrong guess self-corrects in seconds.
+ *
+ * Deliberately mirrors the device's own logic rather than inventing one: at the
+ * setpoint = holding, above it = heating, below it = cooling.
+ */
+static void predict_thermal(zone_state_t *zs)
+{
+    const char *s;
+    if (!zs->on)                s = "standby";
+    else if (zs->actual_c < 0)  s = "holding";      // no measurement to compare against
+    else {
+        float delta = zs->temp_c - zs->actual_c;    // target - measured, °C
+        s = (delta > 0.5f) ? "heating" : (delta < -0.5f) ? "cooling" : "holding";
+    }
+    strlcpy(zs->thermal_state, s, sizeof(zs->thermal_state));
+}
+
 typedef struct { int zone; bool on; } zone_on_t;
 static void mut_zone_on(app_state_t *st, void *arg)
 {
     zone_on_t *u = arg;
     st->zones[u->zone].on = u->on;                  // optimistic
+    predict_thermal(&st->zones[u->zone]);
 }
 
 typedef struct { int zone; float temp_c; } zone_temp_t;
@@ -248,6 +295,7 @@ static void mut_zone_temp(app_state_t *st, void *arg)
     zone_temp_t *u = arg;
     st->zones[u->zone].temp_c = u->temp_c;          // optimistic
     st->ui_temp_f[u->zone] = -1;
+    predict_thermal(&st->zones[u->zone]);
 }
 
 // Response shape shared by start_thermal_relief / cancel_thermal_relief:
@@ -500,6 +548,13 @@ static bool orion_refresh_state(void)
     cJSON *wf = cJSON_GetObjectItem(root, "water_fill");
     if (wf && wf->valuestring) strlcpy(d.water_fill, wf->valuestring, sizeof(d.water_fill));
     cJSON_Delete(root);
+
+    for (int z = 0; z < ZONE_COUNT; z++)
+        if (d.present[z])
+            ESP_LOGI(TAG, "zone %s: on=%d thermal=%s set=%.1fC water=%.1fC",
+                     zone_id_str((zone_idx_t)z), d.zones[z].on,
+                     d.zones[z].thermal_state[0] ? d.zones[z].thermal_state : "(none)",
+                     d.zones[z].temp_c, d.zones[z].actual_c);
 
     dial_state_commit(mut_device_state, &d);
     return true;
@@ -1017,6 +1072,7 @@ static void worker_task(void *arg)
 
     // ---- steady state: drain commands (coalescing per zone), gated poll ----
     int64_t last_poll_us      = esp_timer_get_time();
+    int     poll_confirms     = 0;   // fast reads still owed after a write
     int64_t last_sched_us     = esp_timer_get_time();
     int64_t last_ota_check_us = esp_timer_get_time();   // first auto-check ~24h after boot
     int poll_failures = 0;
@@ -1070,8 +1126,15 @@ static void worker_task(void *arg)
             }
             if (have_pending) handle_immediate_cmd(&pending, &disc, client_id);
 
-            // Push the poll's T0 out so the resync waits for quiet after this.
-            last_poll_us = esp_timer_get_time();
+            // We just changed the bed, so read it back as soon as the user
+            // stops touching it, then keep reading for a few rounds while it
+            // acts on the command. This used to set last_poll_us = now, which
+            // pushed the confirming read a FULL interval away — so switching a
+            // zone on left the dial showing the old state for ~10s even though
+            // the quiet gate below was already all the protection a knob spin
+            // needed.
+            last_poll_us = 0;
+            poll_confirms = POLL_CONFIRM_N;
             continue;
         }
 
@@ -1119,10 +1182,13 @@ static void worker_task(void *arg)
             }
         }
 
-        // No command this tick. Resync only when quiet AND due.
+        // No command this tick. Resync only when quiet AND due — "due" being
+        // sooner while we're still confirming a write the user just made.
         int64_t now = esp_timer_get_time();
         if (now - dial_state_last_input_us() < KNOB_SETTLE_US) continue;
-        if (now - last_poll_us < POLL_INTERVAL_US) continue;
+        int64_t due = poll_confirms > 0 ? POLL_CONFIRM_US : POLL_INTERVAL_US;
+        if (now - last_poll_us < due) continue;
+        if (poll_confirms > 0) poll_confirms--;
 
         if (!dial_wifi_is_connected()) {
             // dial_net auto-reconnects; reflect the outage and wait it out.

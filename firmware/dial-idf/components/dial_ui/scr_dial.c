@@ -473,9 +473,9 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)s_zone);
 
     // #4 Water level: a value-step overlay sharing the arc's exact geometry,
-    // created after it so it lands on top of the fill. Square caps, so the edge
-    // at the water level is a clean boundary rather than a rounded blob — that
-    // edge is the whole reading.
+    // created after it so it lands on top of the fill. Rounded caps to match
+    // every other arc on the face — a square end read as a different material
+    // sitting on the ring rather than as part of it.
     s_level = lv_arc_create(scr);
     lv_obj_set_size(s_level, 2 * ARC_R, 2 * ARC_R);
     lv_obj_center(s_level);
@@ -484,7 +484,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_arc_set_angles(s_level, 0, 0);
     lv_obj_set_style_arc_opa(s_level, LV_OPA_TRANSP, LV_PART_MAIN);   // no second track
     lv_obj_set_style_arc_width(s_level, 16, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(s_level, false, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(s_level, true, LV_PART_INDICATOR);
     lv_obj_remove_style(s_level, NULL, LV_PART_KNOB);
     lv_obj_clear_flag(s_level, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);   // until the first measurement
