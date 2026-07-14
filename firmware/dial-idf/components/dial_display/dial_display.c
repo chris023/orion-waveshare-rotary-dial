@@ -232,6 +232,13 @@ static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, 
     return false;
 }
 
+// Flush instrumentation: the water gauge animates while the bed is working, so
+// the cost of that has to be a measured number rather than a hope. Flip to 1 to
+// log flushes/s and pixels/s every 5s. Measured 2026-07-14 with a worst-case
+// (25°F) band: 30fps lv_anim = 260 flush/s, 3.1 Mpx/s; the 10fps timer that
+// shipped = ~100 flush/s, ~1.15 Mpx/s. Idle (no band) = ~1 flush/s.
+#define DIAL_FLUSH_STATS 0
+
 static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
@@ -239,6 +246,25 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
     const int offsetx2 = area->x2;
     const int offsety1 = area->y1;
     const int offsety2 = area->y2;
+
+#if DIAL_FLUSH_STATS
+    {
+        static uint32_t s_flushes;
+        static uint64_t s_pixels;
+        static int64_t  s_window_us;
+        s_flushes++;
+        s_pixels += (uint64_t)(offsetx2 - offsetx1 + 1) * (offsety2 - offsety1 + 1);
+        int64_t now = esp_timer_get_time();
+        if (!s_window_us) s_window_us = now;
+        if (now - s_window_us >= 5000000) {
+            float secs = (now - s_window_us) / 1000000.0f;
+            ESP_LOGI(TAG, "flush: %.1f/s, %.0f kpx/s (%.1f%% of a full frame/s)",
+                     s_flushes / secs, (s_pixels / 1000.0f) / secs,
+                     100.0f * (s_pixels / secs) / (360.0f * 360.0f));
+            s_flushes = 0; s_pixels = 0; s_window_us = now;
+        }
+    }
+#endif
 
 #if LCD_BIT_PER_PIXEL == 24
     uint8_t *to = (uint8_t *)color_map;
