@@ -11,6 +11,7 @@
 #include <stdarg.h>
 #include "esp_log.h"
 #include "esp_http_client.h"
+#include "esp_timer.h"
 #include "cJSON.h"
 
 static const char *TAG = "mcp";
@@ -40,9 +41,30 @@ typedef struct {
     char session_id[128];
 } mcp_resp_t;
 
+/*
+ * The connection is held open across calls (keep-alive) instead of being torn
+ * down and rebuilt every time.
+ *
+ * Every call used to run esp_http_client_init -> perform -> cleanup, which
+ * meant a fresh TCP connect and a full TLS handshake per MCP call — hundreds of
+ * milliseconds of CPU-bound crypto, on a device whose whole job is to answer a
+ * knob. That handshake bought nothing: it's the same host, with the same cert,
+ * every time. Now one handle is opened lazily and reused.
+ *
+ * The handle is owned exclusively by the worker task (nothing else calls into
+ * dial_mcp), so it needs no locking.
+ *
+ * Because the response handler's user_data is bound at init time and the handle
+ * now outlives a single call, the active response buffer is tracked here rather
+ * than passed through the config.
+ */
+static esp_http_client_handle_t s_http;
+static mcp_resp_t              *s_active;
+
 static esp_err_t on_http(esp_http_client_event_t *e)
 {
-    mcp_resp_t *r = e->user_data;
+    mcp_resp_t *r = s_active;
+    if (!r) return ESP_OK;
     switch (e->event_id) {
     case HTTP_EVENT_ON_HEADER:
         if (e->header_key && e->header_value) {
@@ -68,6 +90,49 @@ static esp_err_t on_http(esp_http_client_event_t *e)
     default: break;
     }
     return ESP_OK;
+}
+
+static void http_close(void)
+{
+    if (s_http) {
+        esp_http_client_cleanup(s_http);
+        s_http = NULL;
+    }
+}
+
+static bool http_open(void)
+{
+    if (s_http) return true;
+    esp_http_client_config_t cfg = {
+        .url               = MCP_URL,
+        .method            = HTTP_METHOD_POST,
+        .event_handler     = on_http,
+        .cert_pem          = dial_oauth_root_ca(),
+        .timeout_ms        = 20000,
+        .buffer_size       = 2048,
+        .keep_alive_enable = true,     // the whole point: one TLS handshake, many calls
+    };
+    s_http = esp_http_client_init(&cfg);
+    return s_http != NULL;
+}
+
+// One POST on the persistent handle. Headers are re-set every call because the
+// bearer token changes on refresh, and because a reconnect hands us a fresh
+// handle with none of them.
+static esp_err_t http_send(const char *method, const char *auth, const char *body)
+{
+    if (!http_open()) return ESP_ERR_NO_MEM;
+
+    esp_http_client_set_method(s_http, HTTP_METHOD_POST);
+    esp_http_client_set_header(s_http, "Content-Type", "application/json");
+    esp_http_client_set_header(s_http, "Accept", "application/json, text/event-stream");
+    esp_http_client_set_header(s_http, "Authorization", auth);
+    if (s_session_id[0]) esp_http_client_set_header(s_http, "Mcp-Session-Id", s_session_id);
+    if (strcmp(method, "initialize") != 0)
+        esp_http_client_set_header(s_http, "MCP-Protocol-Version", MCP_PROTOCOL_VERSION);
+    esp_http_client_set_post_field(s_http, body, strlen(body));
+
+    return esp_http_client_perform(s_http);
 }
 
 /*
@@ -101,27 +166,27 @@ static cJSON *rpc(const char *method, cJSON *params, bool notification, bool *ok
     snprintf(auth, sizeof(auth), "Bearer %s", token);
 
     mcp_resp_t r = { 0 };
-    esp_http_client_config_t cfg = {
-        .url = MCP_URL,
-        .method = HTTP_METHOD_POST,
-        .event_handler = on_http,
-        .user_data = &r,
-        .cert_pem = dial_oauth_root_ca(),
-        .timeout_ms = 20000,
-        .buffer_size = 2048,
-    };
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    esp_http_client_set_header(c, "Content-Type", "application/json");
-    esp_http_client_set_header(c, "Accept", "application/json, text/event-stream");
-    esp_http_client_set_header(c, "Authorization", auth);
-    if (s_session_id[0]) esp_http_client_set_header(c, "Mcp-Session-Id", s_session_id);
-    if (strcmp(method, "initialize") != 0)
-        esp_http_client_set_header(c, "MCP-Protocol-Version", MCP_PROTOCOL_VERSION);
-    esp_http_client_set_post_field(c, body, strlen(body));
+    s_active = &r;
 
-    esp_err_t err = esp_http_client_perform(c);
-    int status = (err == ESP_OK) ? esp_http_client_get_status_code(c) : -1;
-    esp_http_client_cleanup(c);
+    int64_t t0 = esp_timer_get_time();
+    esp_err_t err = http_send(method, auth, body);
+    if (err != ESP_OK) {
+        // A kept-alive connection the server has since dropped (idle timeout,
+        // or the Wi-Fi went away and came back) fails on its FIRST use and only
+        // then — the socket looks fine until we write to it. That is not a real
+        // failure, so rebuild the connection and send once more before saying
+        // so. Without this, keep-alive would turn every idle gap into a
+        // spurious "Orion unreachable".
+        ESP_LOGI(TAG, "connection stale (%s) — reconnecting", esp_err_to_name(err));
+        http_close();
+        free(r.buf);
+        r = (mcp_resp_t){ 0 };
+        s_active = &r;
+        err = http_send(method, auth, body);
+    }
+    int status = (err == ESP_OK) ? esp_http_client_get_status_code(s_http) : -1;
+    ESP_LOGI(TAG, "%s: %d in %lld ms", method, status, (esp_timer_get_time() - t0) / 1000);
+    s_active = NULL;
     free(body);
 
     if (r.session_id[0]) strlcpy(s_session_id, r.session_id, sizeof(s_session_id));
