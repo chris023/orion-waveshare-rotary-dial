@@ -59,10 +59,51 @@ void dial_state_restore_prefs(void)
     xSemaphoreGive(s_mux);
 }
 
+/*
+ * thermal_state is device truth and only lands on a poll, so anything the user
+ * does — switching a zone on, turning the knob past the water temperature —
+ * would leave the arc and pill rendering the OLD state until the next read.
+ * Predict it from the two things already known: where the water is, and where
+ * they just asked it to go. The next poll overwrites this with the truth, so a
+ * wrong guess self-corrects within seconds.
+ *
+ * Uses the optimistic target (ui_temp_f) when one is pending, because that is
+ * what the user is looking at — not the setpoint the device has been told about
+ * so far. Caller must hold the lock.
+ */
+void dial_state_predict_thermal(app_state_t *st, zone_idx_t zone)
+{
+    zone_state_t *zs = &st->zones[zone];
+    const char *s;
+    if (!zs->on)               s = "standby";
+    else if (zs->actual_c < 0) s = "holding";   // nothing measured to compare against
+    else {
+        float target_c = (st->ui_temp_f[zone] >= 0) ? dial_f_to_c(st->ui_temp_f[zone])
+                                                    : zs->temp_c;
+        float delta = target_c - zs->actual_c;
+        s = (delta > 0.5f) ? "heating" : (delta < -0.5f) ? "cooling" : "holding";
+    }
+    strlcpy(zs->thermal_state, s, sizeof(zs->thermal_state));
+}
+
 void dial_state_set_ui_temp(zone_idx_t zone, int temp_f)
 {
     xSemaphoreTake(s_mux, portMAX_DELAY);
     s_state.ui_temp_f[zone] = temp_f;
+    dial_state_predict_thermal(&s_state, zone);   // the pill follows the knob, not the poll
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+}
+
+// Optimistic power flip, committed by the UI the instant the disc is tapped.
+// The worker used to be the only one to set this — but it commits only AFTER
+// the write to Orion returns, so the face sat unchanged for a whole TLS round
+// trip while the user waited on a button they had already pressed.
+void dial_state_set_zone_on(zone_idx_t zone, bool on)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.zones[zone].on = on;
+    dial_state_predict_thermal(&s_state, zone);
     s_state.generation++;
     xSemaphoreGive(s_mux);
 }

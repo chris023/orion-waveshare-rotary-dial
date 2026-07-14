@@ -259,43 +259,35 @@ static void mut_identity(app_state_t *st, void *arg)
 }
 
 /*
- * thermal_state is device truth and only arrives on a poll — so a zone the user
- * has just switched on keeps rendering the "standby"/"holding" it had before,
- * and the dial insists nothing is happening while the bed is visibly spinning
- * up. Predict it instead from the two things we already know: where the water
- * is, and where they just asked it to go. The next poll overwrites this with
- * the truth, so a wrong guess self-corrects in seconds.
- *
- * Deliberately mirrors the device's own logic rather than inventing one: at the
- * setpoint = holding, above it = heating, below it = cooling.
+ * Write acks. `issued_us` is when the worker STARTED the write, so these can
+ * tell the difference between "the user has not touched anything since" and
+ * "the user kept going while this was in flight". A write that lands after
+ * newer input must not roll the display back to what it happened to send.
  */
-static void predict_thermal(zone_state_t *zs)
-{
-    const char *s;
-    if (!zs->on)                s = "standby";
-    else if (zs->actual_c < 0)  s = "holding";      // no measurement to compare against
-    else {
-        float delta = zs->temp_c - zs->actual_c;    // target - measured, °C
-        s = (delta > 0.5f) ? "heating" : (delta < -0.5f) ? "cooling" : "holding";
-    }
-    strlcpy(zs->thermal_state, s, sizeof(zs->thermal_state));
-}
-
-typedef struct { int zone; bool on; } zone_on_t;
+typedef struct { int zone; bool on; int64_t issued_us; } zone_on_t;
 static void mut_zone_on(app_state_t *st, void *arg)
 {
     zone_on_t *u = arg;
-    st->zones[u->zone].on = u->on;                  // optimistic
-    predict_thermal(&st->zones[u->zone]);
+    if (dial_state_last_input_us() > u->issued_us) return;   // user moved on; leave their state alone
+    st->zones[u->zone].on = u->on;
+    dial_state_predict_thermal(st, u->zone);
 }
 
-typedef struct { int zone; float temp_c; } zone_temp_t;
+typedef struct { int zone; float temp_c; int64_t issued_us; } zone_temp_t;
 static void mut_zone_temp(app_state_t *st, void *arg)
 {
     zone_temp_t *u = arg;
-    st->zones[u->zone].temp_c = u->temp_c;          // optimistic
-    st->ui_temp_f[u->zone] = -1;
-    predict_thermal(&st->zones[u->zone]);
+    st->zones[u->zone].temp_c = u->temp_c;          // the device now holds this target
+
+    // Only retire the optimistic display value if nothing newer has been dialled
+    // in since this write left. Clearing it unconditionally is what made the
+    // numeral run up with the knob and then SNAP BACK to whatever value the
+    // in-flight write happened to carry — a number the user had already turned
+    // past. The newer value has its own CMD_SET_TEMP queued behind this one.
+    if (dial_state_last_input_us() <= u->issued_us)
+        st->ui_temp_f[u->zone] = -1;
+
+    dial_state_predict_thermal(st, u->zone);
 }
 
 // Response shape shared by start_thermal_relief / cancel_thermal_relief:
@@ -330,7 +322,10 @@ static void mut_relief_ack(app_state_t *st, void *arg)
 static void mut_bed_off(app_state_t *st, void *arg)
 {
     (void)arg;
-    for (int z = 0; z < ZONE_COUNT; z++) st->zones[z].on = false;   // optimistic
+    for (int z = 0; z < ZONE_COUNT; z++) {
+        st->zones[z].on = false;                   // optimistic
+        dial_state_predict_thermal(st, (zone_idx_t)z);
+    }
 }
 
 static void mut_away(app_state_t *st, void *arg) { st->away = *(bool *)arg; }
@@ -346,6 +341,7 @@ static void mut_match_partner(app_state_t *st, void *arg)
     st->zones[m->other].temp_c = m->temp_c;
     st->zones[m->other].on     = m->on;
     st->ui_temp_f[m->other]    = -1;
+    dial_state_predict_thermal(st, m->other);
 }
 
 // Tonight schedule (M5) snapshot from get_sleep_schedules — TODAY's entry
@@ -1085,7 +1081,8 @@ static void worker_task(void *arg)
             // two kinds).
             if (cmd.kind != CMD_SET_TEMP && cmd.kind != CMD_TOGGLE_ON) {
                 handle_immediate_cmd(&cmd, &disc, client_id);
-                last_poll_us = esp_timer_get_time();
+                last_poll_us = 0;                  // read it back now, not in 10s
+                poll_confirms = POLL_CONFIRM_N;    // ...and again while the bed acts on it
                 continue;
             }
 
@@ -1095,20 +1092,28 @@ static void worker_task(void *arg)
             // lands mid-drain, stop coalescing and handle it right after
             // rather than silently mis-treating it as a toggle.
             int last_temp[ZONE_COUNT] = { -1, -1 };
-            int toggles[ZONE_COUNT]   = { 0, 0 };
+            int want_on[ZONE_COUNT]   = { -1, -1 };   // -1 = untouched this burst
             bool have_pending = false;
             app_cmd_t pending;
+            // The command carries the DESIRED on state, so the last one posted
+            // wins. (It used to count toggle parity and then re-derive
+            // !current from the store — which now flips optimistically on tap,
+            // so re-deriving would have undone the user's own press.)
             do {
                 if (cmd.kind == CMD_SET_TEMP)       last_temp[cmd.zone] = cmd.temp_f;
-                else if (cmd.kind == CMD_TOGGLE_ON) toggles[cmd.zone]++;
+                else if (cmd.kind == CMD_TOGGLE_ON) want_on[cmd.zone] = cmd.a ? 1 : 0;
                 else { have_pending = true; pending = cmd; break; }
             } while (dial_cmd_receive(&cmd, 0));
 
+            // Stamped BEFORE the writes: anything the user does during the
+            // round trip is newer than this batch, and must not be undone by
+            // the commits below (that was the knob "jumping back" to a value
+            // the user had already turned past).
+            int64_t issued_us = esp_timer_get_time();
+
             for (int z = 0; z < ZONE_COUNT; z++) {
-                if (toggles[z] & 1) {
-                    app_state_t st;
-                    dial_state_get(&st);
-                    zone_on_t up = { z, !st.zones[z].on };
+                if (want_on[z] >= 0) {
+                    zone_on_t up = { z, want_on[z] != 0, issued_us };
                     char f[24];
                     snprintf(f, sizeof(f), "\"on\":%s", up.on ? "true" : "false");
                     set_zone_args_t sa = { (zone_idx_t)z, f };
@@ -1116,7 +1121,7 @@ static void worker_task(void *arg)
                         dial_state_commit(mut_zone_on, &up);
                 }
                 if (last_temp[z] >= 0) {
-                    zone_temp_t up = { z, dial_f_to_c(last_temp[z]) };
+                    zone_temp_t up = { z, dial_f_to_c(last_temp[z]), issued_us };
                     char f[24];
                     snprintf(f, sizeof(f), "\"temp\":%.1f", up.temp_c);
                     set_zone_args_t sa = { (zone_idx_t)z, f };

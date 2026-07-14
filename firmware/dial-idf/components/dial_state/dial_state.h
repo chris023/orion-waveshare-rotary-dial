@@ -198,6 +198,18 @@ void dial_state_set_phase(conn_phase_t phase, const char *err);
 // Hot-path setter used by the dial screen during knob/drag interaction.
 void dial_state_set_ui_temp(zone_idx_t zone, int temp_f);
 
+// Optimistic power flip — call from the UI on tap, so the face answers the
+// press instead of waiting for the write to Orion to come back. The next poll
+// reconciles (and reverts it, if the write failed).
+void dial_state_set_zone_on(zone_idx_t zone, bool on);
+
+// Derive a zone's thermal_state from its target vs. its measured water temp.
+// Used by the optimistic setters above and by the worker's own commits, so the
+// UI and the worker never disagree about what a pending change means. Caller
+// must hold the store lock (i.e. call it from inside a dial_state_commit
+// mutator, or from dial_state.c itself).
+void dial_state_predict_thermal(app_state_t *st, zone_idx_t zone);
+
 // Record which side the UI is showing. The nav policy follows this, so any
 // screen that switches sides MUST commit it here (or the next state commit
 // navigates right back — the side choice lives in the store, not the router).
@@ -226,7 +238,9 @@ int64_t dial_state_last_input_us(void);
  */
 typedef enum {
     CMD_SET_TEMP,      // zone + temp_f
-    CMD_TOGGLE_ON,     // zone
+    CMD_TOGGLE_ON,     // zone + a = the DESIRED on state (1/0), not "flip it".
+                       // The UI flips the store optimistically before posting,
+                       // so a worker that re-derived !current would undo it.
     CMD_BOOST_START,   // zone + a=heat?1:0 + b=minutes
     CMD_BOOST_CANCEL,  // zone ignored — cancels relief on every zone
     CMD_BED_OFF,       // zone ignored — both zones off, atomically

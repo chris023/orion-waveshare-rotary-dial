@@ -415,9 +415,21 @@ static void arc_event_cb(lv_event_t *e)
 
 static void power_event_cb(lv_event_t *e)
 {
+    dial_state_stamp_input();
     dial_haptics_play(HAPTIC_CONFIRM);
-    app_cmd_t cmd = { .kind = CMD_TOGGLE_ON,
-                      .zone = (zone_idx_t)(uintptr_t)lv_event_get_user_data(e) };
+    zone_idx_t zone = (zone_idx_t)(uintptr_t)lv_event_get_user_data(e);
+
+    // Flip it in the store NOW, and tell the worker what we want rather than
+    // asking it to toggle: the worker commits only after the write to Orion
+    // returns, so deriving the new value there meant the face didn't move until
+    // a TLS round trip had completed — a button that visibly did nothing for a
+    // second. The next poll reconciles, and reverts this if the write failed.
+    app_state_t st;
+    dial_state_get(&st);
+    bool want_on = !st.zones[zone].on;
+    dial_state_set_zone_on(zone, want_on);
+
+    app_cmd_t cmd = { .kind = CMD_TOGGLE_ON, .zone = zone, .a = want_on ? 1 : 0 };
     dial_cmd_post(&cmd);
 }
 
