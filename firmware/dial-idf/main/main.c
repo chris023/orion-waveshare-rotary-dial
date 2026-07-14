@@ -1300,5 +1300,10 @@ void app_main(void)
     dial_state_commit(mut_ap_ssid, (void *)dial_net_ap_ssid());
 
     // OAuth/TLS/MCP need a big stack; everything network runs on this task.
-    xTaskCreate(worker_task, "worker", 16384, NULL, 4, NULL);
+    // Priority 3 and pinned to core 0 — BELOW the LVGL task (5, core 1), which
+    // the user is actually looking at. It used to be 4, outranking the UI, so a
+    // TLS handshake froze the screen and swallowed taps. Core 0 is where Wi-Fi
+    // and lwIP already live, so the network work stays on the network core and
+    // leaves the UI a core of its own.
+    xTaskCreatePinnedToCore(worker_task, "worker", 16384, NULL, 3, NULL, 0);
 }

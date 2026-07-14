@@ -467,5 +467,6 @@ void dial_display_start(void)
 
     lvgl_mux = xSemaphoreCreateMutex();
     assert(lvgl_mux);
-    xTaskCreate(example_lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE, NULL, EXAMPLE_LVGL_TASK_PRIORITY, NULL);
+    xTaskCreatePinnedToCore(example_lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE, NULL,
+                            EXAMPLE_LVGL_TASK_PRIORITY, NULL, EXAMPLE_LVGL_TASK_CORE);
 }

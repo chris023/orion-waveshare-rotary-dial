@@ -34,7 +34,21 @@
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 5
 #define EXAMPLE_LVGL_TASK_STACK_SIZE   (8 * 1024)
-#define EXAMPLE_LVGL_TASK_PRIORITY     2
+/*
+ * The UI outranks everything it competes with, and it gets its own core.
+ *
+ * This was 2 — BELOW the network worker's 4 — which meant that every time the
+ * worker ran a TLS handshake (and it runs one per MCP call, since each call
+ * opens a fresh HTTPS connection), FreeRTOS preempted the LVGL task for the
+ * whole of that CPU-bound crypto. The screen stopped repainting, and since
+ * LVGL is also what polls the touch panel, a tap that began and ended inside
+ * that window was never seen at all. That is what made the dial feel like it
+ * was freezing and dropping presses.
+ *
+ * Rule now: nothing the user is waiting on may be starved by work they are not.
+ */
+#define EXAMPLE_LVGL_TASK_PRIORITY     5
+#define EXAMPLE_LVGL_TASK_CORE         1   // APP core; Wi-Fi/lwIP live on core 0
 
 #define EXAMPLE_USE_TOUCH  1 //Without tp ---- Touch off
 

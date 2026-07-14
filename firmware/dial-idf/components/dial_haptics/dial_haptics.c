@@ -151,7 +151,10 @@ void dial_haptics_init(void)
     // Queue length 1 + overwrite: only the newest effect matters.
     s_q = xQueueCreate(1, sizeof(haptic_effect_t));
     configASSERT(s_q);
-    xTaskCreate(haptics_task, "haptics", 2560, NULL, 3, NULL);
+    // Above the network worker (3): a detent's tick is part of the input, and
+    // must not queue behind a TLS handshake. Below LVGL (5) — the frame the
+    // user sees still wins.
+    xTaskCreate(haptics_task, "haptics", 2560, NULL, 4, NULL);
 }
 
 void dial_haptics_play(haptic_effect_t fx)
