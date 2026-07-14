@@ -83,8 +83,22 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_text_color(s_clock_lbl, night ? pal->neutral_holding : pal->ink_primary, 0);
 
     if (!st->have_state) return;
-    set_presence_dot(s_dot_left,  dial_zone_kind(&st->zones[ZONE_B], st->device_online), pal);
-    set_presence_dot(s_dot_right, dial_zone_kind(&st->zones[ZONE_A], st->device_online), pal);
+    // One presence dot per side the bed actually has: a single-zone topper
+    // shows the one dot, centered, instead of a permanently-dead second one.
+    if (dial_state_is_dual(st)) {
+        lv_obj_clear_flag(s_dot_left, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_dot_right, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(s_dot_left,  LV_ALIGN_CENTER, 164 - CX, 104 - CY);
+        lv_obj_align(s_dot_right, LV_ALIGN_CENTER, 196 - CX, 104 - CY);
+        set_presence_dot(s_dot_left,  dial_zone_kind(&st->zones[ZONE_B], st->device_online), pal);
+        set_presence_dot(s_dot_right, dial_zone_kind(&st->zones[ZONE_A], st->device_online), pal);
+    } else {
+        zone_idx_t p = dial_state_primary_zone(st);
+        lv_obj_add_flag(s_dot_left, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_dot_right, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(s_dot_right, LV_ALIGN_CENTER, 0, 104 - CY);
+        set_presence_dot(s_dot_right, dial_zone_kind(&st->zones[p], st->device_online), pal);
+    }
 }
 
 static void wake(void)

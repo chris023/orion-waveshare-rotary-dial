@@ -155,12 +155,13 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
                 return SCR_STANDBY;
             }
             if (passive || cur == SCR_QUICK || cur == SCR_BOOST || cur == SCR_SETTINGS) return cur;
-            // First link on a fresh device: pick a default side before
-            // showing the dial (SCR_SIDEPICK). The `cur` half of this OR
-            // also pins the screen when Settings' "My side" row reuses it on
-            // an already-linked device — a routine poll landing mid-repick
-            // must not yank the user back to the dial before they tap.
-            if ((st->fresh_device && !st->side_picked) || cur == SCR_SIDEPICK)
+            // First link on a fresh device: pick a default side before showing
+            // the dial (SCR_SIDEPICK). Nothing to pick on a single-zone topper,
+            // so that device goes straight to its one face. The `cur` half of
+            // the OR keeps a poll from yanking the user off the picker
+            // mid-decision.
+            if (dial_state_is_dual(st) &&
+                ((st->fresh_device && !st->side_picked) || cur == SCR_SIDEPICK))
                 return SCR_SIDEPICK;
             *arg = (void *)(uintptr_t)st->ui_zone;
             return dial_power_level() == DPWR_STANDBY ? SCR_STANDBY : SCR_DIAL;
@@ -174,6 +175,7 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
 
 typedef struct {
     zone_state_t zones[ZONE_COUNT];
+    bool present[ZONE_COUNT];  // zone ids actually carried by this response
     bool online;
     bool safety_error;
     char safety_desc[96];
@@ -201,6 +203,13 @@ static void mut_device_state(app_state_t *st, void *arg)
         st->zones[z].sched_override_available   = keep.sched_override_available;
         st->zones[z].sched_override_applied     = keep.sched_override_applied;
     }
+    for (int z = 0; z < ZONE_COUNT; z++) st->zone_present[z] = d->present[z];
+    // A single-zone topper has no partner face to show. If the persisted side
+    // names a zone this device doesn't have (a dial moved between beds, or a
+    // NVS value from before this field existed), fall back to the one it does —
+    // otherwise nav_policy would keep routing to a face built from an empty zone.
+    if (!st->zone_present[st->ui_zone])
+        st->ui_zone = dial_state_primary_zone(st);
     st->device_online = d->online;
     st->safety.error = d->safety_error;
     strlcpy(st->safety.desc, d->safety_desc, sizeof(st->safety.desc));
@@ -448,11 +457,22 @@ static bool orion_refresh_state(void)
     cJSON_ArrayForEach(z, cJSON_GetObjectItem(root, "zones")) {
         cJSON *id = cJSON_GetObjectItem(z, "id");
         if (!id || !id->valuestring) continue;
-        zone_state_t *zs = &d.zones[zone_idx_from_id(id->valuestring)];
+        // zones[] is the authority on how many sides this topper has: a
+        // single-zone model reports one entry (see app_state_t.zone_present).
+        zone_idx_t zi = zone_idx_from_id(id->valuestring);
+        d.present[zi] = true;
+        zone_state_t *zs = &d.zones[zi];
         cJSON *t = cJSON_GetObjectItem(z, "temp");
         if (cJSON_IsNumber(t)) zs->temp_c = (float)t->valuedouble;
         zs->on = cJSON_IsTrue(cJSON_GetObjectItem(z, "on"));
         parse_thermal_relief(z, zs);
+    }
+    // A response with no zones at all is not a single-zone device, it's a
+    // malformed/partial payload — don't let it collapse the UI to one face.
+    if (!d.present[ZONE_A] && !d.present[ZONE_B]) {
+        ESP_LOGW(TAG, "get_device_state returned no zones — ignoring this poll");
+        cJSON_Delete(root);
+        return false;
     }
 
     cJSON *status = cJSON_GetObjectItem(root, "status");
@@ -540,11 +560,20 @@ static bool orion_boost_cancel(void *arg)
 static bool orion_bed_off(void *arg)
 {
     (void)arg;
+    // Only name zones this topper actually has — a single-zone device would
+    // reject (or silently ignore) a set_zones carrying a zone_b it doesn't own.
+    app_state_t st;
+    dial_state_get(&st);
+    char zones[96] = "";
+    for (int z = 0; z < ZONE_COUNT; z++) {
+        if (!st.zone_present[z]) continue;
+        char one[48];
+        snprintf(one, sizeof(one), "%s{\"id\":\"%s\",\"on\":false}",
+                 zones[0] ? "," : "", zone_id_str((zone_idx_t)z));
+        strlcat(zones, one, sizeof(zones));
+    }
     char args[160];
-    snprintf(args, sizeof(args),
-             "{\"serial\":\"%s\",\"zones\":[{\"id\":\"zone_a\",\"on\":false},"
-             "{\"id\":\"zone_b\",\"on\":false}]}",
-             s_serial);
+    snprintf(args, sizeof(args), "{\"serial\":\"%s\",\"zones\":[%s]}", s_serial, zones);
     char *r = NULL;
     bool ok = dial_mcp_call_tool("set_zones", args, &r);
     if (!ok) ESP_LOGW(TAG, "set_zones (bed off) failed: %s", dial_mcp_last_error());
@@ -810,6 +839,7 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         // turns could have landed in between).
         app_state_t st;
         dial_state_get(&st);
+        if (!dial_state_is_dual(&st)) break;   // no partner side to match on a single-zone topper
         zone_idx_t mine  = cmd->zone;
         zone_idx_t other = (mine == ZONE_A) ? ZONE_B : ZONE_A;
         match_args_t m = { other, st.zones[mine].temp_c, st.zones[mine].on };
@@ -817,20 +847,27 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
             dial_state_commit(mut_match_partner, &m);
         break;
     }
-    // Tonight schedule (M5) — ZONE_A only, see dial_state.h's comment beside
-    // CMD_TONIGHT_OVERRIDE for why the partner side is dropped here.
+    // Tonight schedule (M5) — the owner's own side only, see dial_state.h's
+    // comment beside CMD_TONIGHT_OVERRIDE for why the partner side is dropped
+    // here. That side is ZONE_A on a normal topper, but a single-zone model may
+    // only have ZONE_B, so compare against the device's primary zone.
     case CMD_TONIGHT_OVERRIDE: {
-        if (cmd->zone != ZONE_A) break;
+        app_state_t st;
+        dial_state_get(&st);
+        if (cmd->zone != dial_state_primary_zone(&st)) break;
         tonight_override_args_t a = { cmd->a, cmd->b };
         if (with_auth_retry(orion_tonight_override, &a, disc, client_id))
             with_auth_retry(sched_call, NULL, disc, client_id);   // refresh so override_applied flips immediately
         break;
     }
-    case CMD_TONIGHT_REVERT:
-        if (cmd->zone != ZONE_A) break;
+    case CMD_TONIGHT_REVERT: {
+        app_state_t st;
+        dial_state_get(&st);
+        if (cmd->zone != dial_state_primary_zone(&st)) break;
         if (with_auth_retry(orion_tonight_revert, NULL, disc, client_id))
             with_auth_retry(sched_call, NULL, disc, client_id);
         break;
+    }
     // Settings (M4) destructive actions: each erases some NVS state and
     // reboots — there's no follow-up state commit because esp_restart()
     // never returns.

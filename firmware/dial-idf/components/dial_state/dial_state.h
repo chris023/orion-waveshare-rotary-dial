@@ -99,6 +99,12 @@ typedef struct {
     char    serial[16];
     bool    device_online;
     zone_state_t zones[ZONE_COUNT];
+    // Which zones the device actually reports (get_device_state's zones[]).
+    // Orion also sells SINGLE-ZONE toppers, so a zone entry existing is not a
+    // given: everything that assumes a partner side (the side-swap chain, the
+    // page dots, "Match my side", the side picker) must gate on this rather
+    // than on ZONE_COUNT. Valid once have_state; see dial_state_is_dual().
+    bool    zone_present[ZONE_COUNT];
     struct { bool error; char desc[96]; } safety;
     char    water_fill[12];
     bool    away;             // session-optimistic (set_away has no readback)
@@ -153,6 +159,25 @@ typedef struct {
     // Bumped on every commit; the UI dispatcher re-renders when it changes.
     uint32_t generation;
 } app_state_t;
+
+/*
+ * Zone-count helpers (single-zone toppers). Before have_state nothing is known
+ * about the device, so these answer for the layout the UI is currently drawing:
+ * dial_state_is_dual() is false until the device says otherwise, which keeps a
+ * booting dial from flashing a partner face that may not exist.
+ */
+static inline bool dial_state_is_dual(const app_state_t *st)
+{
+    return st->zone_present[ZONE_A] && st->zone_present[ZONE_B];
+}
+
+// The zone a single-zone device actually has (and, on a dual device, the side
+// whose schedule the Tonight face speaks for). ZONE_A unless the device reports
+// only ZONE_B.
+static inline zone_idx_t dial_state_primary_zone(const app_state_t *st)
+{
+    return (!st->zone_present[ZONE_A] && st->zone_present[ZONE_B]) ? ZONE_B : ZONE_A;
+}
 
 // Initialize the store (mutex + defaults). Call once before any other call.
 void dial_state_init(void);

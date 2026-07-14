@@ -39,6 +39,39 @@ static inline zone_kind_t dial_zone_kind(const zone_state_t *z, bool device_onli
     return ZK_HOLDING;               // "holding", empty, or anything else while on
 }
 
+/*
+ * Page-dot row, shared by the dial faces and the menu face so the two can't
+ * drift out of agreement about the chain.
+ *
+ * Face order is Dial(B) - Dial(A) - Menu: zone_b is the LEFT side of the bed
+ * and zone_a the RIGHT, so walking the chain left-to-right walks the bed
+ * left-to-right. A single-zone topper has no partner face at all — its absent
+ * side's dot is dropped and the remaining pair re-centered, rather than
+ * leaving a dot for a face the swipe can never reach.
+ *
+ * Callers own the fill colors (which dot is "current" differs per screen).
+ */
+static inline void dial_dots_layout(const app_state_t *st, lv_obj_t *dot_b,
+                                    lv_obj_t *dot_a, lv_obj_t *dot_menu)
+{
+    const lv_coord_t y = 340 - 180;   // same rim band on every face
+    if (dial_state_is_dual(st)) {
+        lv_obj_clear_flag(dot_b, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(dot_a, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(dot_b,    LV_ALIGN_CENTER, 164 - 180, y);
+        lv_obj_align(dot_a,    LV_ALIGN_CENTER, 180 - 180, y);
+        lv_obj_align(dot_menu, LV_ALIGN_CENTER, 196 - 180, y);
+    } else {
+        zone_idx_t p = dial_state_primary_zone(st);
+        lv_obj_t *keep = (p == ZONE_A) ? dot_a : dot_b;
+        lv_obj_t *drop = (p == ZONE_A) ? dot_b : dot_a;
+        lv_obj_add_flag(drop, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(keep, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(keep,     LV_ALIGN_CENTER, 172 - 180, y);
+        lv_obj_align(dot_menu, LV_ALIGN_CENTER, 188 - 180, y);
+    }
+}
+
 static inline lv_color_t dial_zone_accent(zone_kind_t k, const dial_palette_t *pal)
 {
     switch (k) {

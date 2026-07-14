@@ -34,6 +34,15 @@ static lv_obj_t *s_dot_a, *s_dot_b, *s_dot_menu;
 // user_data (bound at create(), same idiom scr_dial.c uses for the zone a
 // widget was built for), so adding a fifth row never means adding a fifth
 // near-identical callback.
+// The dial face the menu returns to: whichever side the user was last on
+// (ui_zone), which is also the only side that exists on a single-zone topper.
+static zone_idx_t back_zone(void)
+{
+    app_state_t st;
+    dial_state_get(&st);
+    return st.ui_zone;
+}
+
 static void row_event_cb(lv_event_t *e)
 {
     dial_haptics_play(HAPTIC_TICK);
@@ -44,7 +53,7 @@ static void row_event_cb(lv_event_t *e)
     // into a sub-screen. Keeping it a row (rather than floating chrome) means
     // it never occludes the list and the knob can reach it like anything else.
     if (dest == SCR_DIAL) {
-        ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_B, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+        ui_router_go(SCR_DIAL, (void *)(uintptr_t)back_zone(), LV_SCR_LOAD_ANIM_MOVE_RIGHT);
         return;
     }
     ui_router_go(dest, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
@@ -77,7 +86,7 @@ static lv_obj_t *make_row(lv_obj_t *parent, const char *label_txt, screen_id_t d
 // Walks s_list generically (row -> its one label) instead of naming four
 // pairs of statics — same "palette walk" scr_settings.c's apply_palette
 // uses for its longer row list.
-static void apply_palette(void)
+static void apply_palette(const app_state_t *st)
 {
     const dial_palette_t *pal = PAL();
     lv_obj_t *scr = lv_obj_get_parent(s_ring);
@@ -92,9 +101,9 @@ static void apply_palette(void)
         lv_obj_set_style_text_color(lbl, pal->ink_primary, 0);
     }
 
-    // Page dots (3): Dial(A) - Dial(B) - Menu — Menu's own dot is always
-    // the filled one on this face, same convention scr_tonight used for
-    // its own dot before this screen took its slot in the chain.
+    // Page dots — same row the dial faces draw (dial_dots_layout owns which
+    // dots exist and where); Menu's own dot is always the filled one here.
+    dial_dots_layout(st, s_dot_b, s_dot_a, s_dot_menu);
     lv_obj_set_style_bg_color(s_dot_a, pal->track, 0);
     lv_obj_set_style_bg_color(s_dot_b, pal->track, 0);
     lv_obj_set_style_bg_color(s_dot_menu, pal->ink_secondary, 0);
@@ -151,7 +160,9 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_clear_flag(s_dot_menu, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(s_dot_menu, LV_ALIGN_CENTER, 196 - CX, 340 - CY);
 
-    apply_palette();
+    app_state_t st;
+    dial_state_get(&st);
+    apply_palette(&st);
     dial_list_settle(s_list, 1);   // open on "Tonight", not on Back
 }
 
@@ -164,9 +175,8 @@ static void destroy(void)
 
 static void on_state(const app_state_t *st)
 {
-    (void)st;   // nothing on this face is state-driven besides the palette
     if (!s_ring) return;
-    apply_palette();
+    apply_palette(st);   // palette + the page-dot row (zone count can change under us)
 }
 
 // The knob walks the focused row (one per detent); ends of the list voice
@@ -182,11 +192,9 @@ static bool on_knob(int detents)
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_RIGHT) return false;
-    // Menu always follows from Dial(B) in the face chain (scr_dial.c) —
-    // ui_zone is already ZONE_B from that swipe, nothing to re-commit here
-    // (same reasoning scr_tonight's old exit used before this face took
-    // its slot in the chain).
-    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_B, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+    // Back to the side the user came in from — ui_zone is already whatever that
+    // swipe committed, so there's nothing to re-commit here.
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)back_zone(), LV_SCR_LOAD_ANIM_MOVE_RIGHT);
     return true;
 }
 

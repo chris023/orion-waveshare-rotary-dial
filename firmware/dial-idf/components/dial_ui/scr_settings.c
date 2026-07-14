@@ -21,7 +21,7 @@
 
 static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
-static lv_obj_t *s_val_my_side, *s_val_units, *s_val_haptics;
+static lv_obj_t *s_val_units, *s_val_haptics;
 
 typedef enum { CONFIRM_RELINK = 0, CONFIRM_FACTORY, CONFIRM_COUNT } confirm_id_t;
 static lv_obj_t   *s_val_confirm[CONFIRM_COUNT];
@@ -109,12 +109,6 @@ static void row_back_cb(lv_event_t *e)
     ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
 }
 
-static void row_my_side_cb(lv_event_t *e)
-{
-    (void)e;
-    ui_router_go(SCR_SIDEPICK, NULL, LV_SCR_LOAD_ANIM_NONE);
-}
-
 static void row_units_cb(lv_event_t *e)
 {
     (void)e;
@@ -184,8 +178,10 @@ static void create(lv_obj_t *scr, void *arg)
 
     s_list = dial_list_create(scr, ROW_H);
 
+    // No "My side" row: it only re-ran SCR_SIDEPICK, which sets the very same
+    // ui_zone that one swipe on the dial already sets (and persists) — the row
+    // changed nothing you couldn't change faster by swiping.
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
-    make_row(s_list, "My side",       row_my_side_cb,      &s_val_my_side);
     make_row(s_list, "Units",         row_units_cb,         &s_val_units);
     make_row(s_list, "Haptics",       row_haptics_cb,       &s_val_haptics);
     make_row(s_list, "Re-link Orion", row_relink_cb,        &s_val_confirm[CONFIRM_RELINK]);
@@ -208,7 +204,7 @@ static void destroy(void)
     if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
     s_list = NULL;
     s_title_lbl = NULL;
-    s_val_my_side = s_val_units = s_val_haptics = NULL;
+    s_val_units = s_val_haptics = NULL;
     for (int i = 0; i < CONFIRM_COUNT; i++) s_val_confirm[i] = NULL;
     s_armed = CONFIRM_COUNT;
 }
@@ -217,12 +213,6 @@ static void on_state(const app_state_t *st)
 {
     if (!s_list) return;
     apply_palette(lv_obj_get_parent(s_list));
-
-    const char *name = st->zones[st->ui_zone].user_name;
-    char side_buf[24];
-    if (name[0]) strlcpy(side_buf, name, sizeof(side_buf));
-    else         strlcpy(side_buf, st->ui_zone == ZONE_A ? "Right" : "Left", sizeof(side_buf));
-    lv_label_set_text(s_val_my_side, side_buf);
 
     lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
     lv_label_set_text(s_val_haptics, st->haptics_enabled ? "On" : "Off");

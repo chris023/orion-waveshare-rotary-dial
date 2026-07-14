@@ -300,11 +300,14 @@ static void apply_palette_and_state(const app_state_t *st)
         lv_obj_set_style_opa(s_stale_dot, stale_target, 0);
     }
 
-    // Page dots (3: Dial(A) - Dial(B) - Menu, design-spec.md §4 #13) —
-    // filled = the face this screen instance is showing; scr_dial is never
-    // the menu face, so that dot always tracks.
-    lv_obj_set_style_bg_color(s_dot_a, s_zone == ZONE_A ? pal->ink_secondary : pal->track, 0);
+    // Page dots — one per face, in the order the chain walks them (see
+    // on_gesture): Dial(B) - Dial(A) - Menu on a dual topper, and just
+    // Dial - Menu on a single-zone one, re-centered so the pair sits
+    // symmetric. Filled = the face this screen instance is showing; scr_dial
+    // is never the menu face, so that dot always tracks.
+    dial_dots_layout(st, s_dot_b, s_dot_a, s_dot_menu);
     lv_obj_set_style_bg_color(s_dot_b, s_zone == ZONE_B ? pal->ink_secondary : pal->track, 0);
+    lv_obj_set_style_bg_color(s_dot_a, s_zone == ZONE_A ? pal->ink_secondary : pal->track, 0);
     lv_obj_set_style_bg_color(s_dot_menu, pal->track, 0);
 
     // Away badge (design-spec.md §7 extension) — session-optimistic, tiny.
@@ -639,34 +642,42 @@ static bool on_knob(int detents)
     return true;
 }
 
-// Face order: Dial(A) <-left- Dial(B) <-left- Menu; RIGHT walks the chain
-// back the other way. Quick-actions opens via long-press, not a swipe on the
-// dial itself (see screen_long_press_cb) — up/down are simply unhandled here
-// now that the router forwards all four directions.
+// Face order: Dial(B) <-left- Dial(A) <-left- Menu. zone_b is the LEFT side of
+// the bed and zone_a the RIGHT, so the chain now reads left-to-right the way
+// the bed does. A single-zone topper has no partner face: its one dial sits
+// where the pair would, and a left swipe goes straight to the menu.
+//
+// Quick-actions opens via long-press, not a swipe on the dial itself (see
+// screen_long_press_cb) — up/down are simply unhandled here now that the
+// router forwards all four directions.
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return false;
 
+    app_state_t st;
+    dial_state_get(&st);
+    bool dual = dial_state_is_dual(&st);
+
     if (dir == LV_DIR_LEFT) {
-        if (s_zone == ZONE_A) {
-            // Commit the side choice BEFORE navigating: the nav policy
-            // follows ui_zone, so an uncommitted swipe would be undone by
-            // the next state commit (the poll would yank the view back).
-            dial_state_set_ui_zone(ZONE_B);
-            ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_B, LV_SCR_LOAD_ANIM_MOVE_LEFT);
+        if (dual && s_zone == ZONE_B) {
+            // Commit the side choice BEFORE navigating: the nav policy follows
+            // ui_zone, so an uncommitted swipe would be undone by the next
+            // state commit (the poll would yank the view back).
+            dial_state_set_ui_zone(ZONE_A);
+            ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_MOVE_LEFT);
         } else {
-            // End of the dial chain — the menu face is a step further left
-            // (Tonight/Settings/Wi-Fi/About all live behind it now).
+            // End of the dial chain (or the only dial there is) — the menu face
+            // is a step further left.
             ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
         }
         return true;
     }
 
-    // RIGHT walks back toward Dial(A). From Dial(A) there is nothing further
-    // right, so leave the gesture unconsumed rather than faking a transition.
-    if (s_zone == ZONE_B) {
-        dial_state_set_ui_zone(ZONE_A);
-        ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+    // RIGHT walks back toward Dial(B). From the leftmost face there's nothing
+    // further right, so leave the gesture unconsumed rather than fake a move.
+    if (dual && s_zone == ZONE_A) {
+        dial_state_set_ui_zone(ZONE_B);
+        ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_B, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
         return true;
     }
     return false;

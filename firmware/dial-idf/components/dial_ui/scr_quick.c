@@ -202,6 +202,10 @@ static void on_state(const app_state_t *st)
     if (!s_sheet) return;
     s_away = st->away;
     lv_label_set_text(s_lbl_away, s_away ? "Away mode off" : "Away mode on");
+    // "Match my side" needs a partner side to copy onto — a single-zone topper
+    // has none, so the row goes away entirely rather than sitting there inert.
+    if (dial_state_is_dual(st)) lv_obj_clear_flag(s_row_match, LV_OBJ_FLAG_HIDDEN);
+    else                        lv_obj_add_flag(s_row_match, LV_OBJ_FLAG_HIDDEN);
     apply_palette();
 }
 

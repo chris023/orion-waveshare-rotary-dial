@@ -4,10 +4,12 @@
  * to the menu) or the standby idle timeout (main.c's nav_policy checks that
  * before folding this screen into the sticky set — see the comment there).
  *
- * Always shows ZONE_A's schedule regardless of which dial side you arrived
- * from: the Orion override call has no way to target a specific user, so
- * only the dial's own side supports the override control (see the long
- * comment beside CMD_TONIGHT_OVERRIDE in dial_state.h). zone_state_t's
+ * Always shows the PRIMARY zone's schedule regardless of which dial side you
+ * arrived from: the Orion override call has no way to target a specific user,
+ * so only the dial's own side supports the override control (see the long
+ * comment beside CMD_TONIGHT_OVERRIDE in dial_state.h). That's ZONE_A on a
+ * normal topper and the sole zone on a single-zone one — hence
+ * dial_state_primary_zone() rather than a hardcoded ZONE_A. zone_state_t's
  * sched_* fields are populated by main.c's orion_refresh_schedules() from
  * get_sleep_schedules, matched to a zone via a worker-side uuid map.
  *
@@ -154,7 +156,7 @@ static void enter_picker_mode_cb(lv_event_t *e)
     if (s_picker_mode) return;
     app_state_t st;
     dial_state_get(&st);
-    const zone_state_t *z = &st.zones[ZONE_A];
+    const zone_state_t *z = &st.zones[dial_state_primary_zone(&st)];
     int base_min;
     if (!z->sched_valid || !z->sched_override_available ||
         !dial_parse_hhmm(z->sched_wakeup, &base_min))
@@ -183,8 +185,11 @@ static void confirm_picker_cb(lv_event_t *e)
     if (!s_picker_mode) return;
     if (s_suppress_click) { s_suppress_click = false; return; }
     dial_haptics_play(HAPTIC_CONFIRM);
+    app_state_t st;
+    dial_state_get(&st);
     int wake_min = ((s_picker_base_min + s_picker_offset_min) % 1440 + 1440) % 1440;
-    app_cmd_t cmd = { .kind = CMD_TONIGHT_OVERRIDE, .zone = ZONE_A, .a = wake_min, .b = -1 };
+    app_cmd_t cmd = { .kind = CMD_TONIGHT_OVERRIDE, .zone = dial_state_primary_zone(&st),
+                      .a = wake_min, .b = -1 };
     dial_cmd_post(&cmd);
     exit_picker_mode();
 }
@@ -210,7 +215,7 @@ static void apply_palette_and_state(const app_state_t *st)
     // day/night flip landing mid-edit must not fight the picker's own view.
     if (s_picker_mode) return;
 
-    const zone_state_t *z = &st->zones[ZONE_A];
+    const zone_state_t *z = &st->zones[dial_state_primary_zone(st)];
     lv_obj_set_style_text_color(s_bedtime_lbl, pal->ink_primary, 0);
     lv_obj_set_style_text_color(s_bedtime_cap_lbl, pal->ink_secondary, 0);
     lv_obj_set_style_text_color(s_wake_lbl, pal->ink_primary, 0);
@@ -277,7 +282,9 @@ static void chip_event_cb(lv_event_t *e)
 {
     (void)e;
     dial_haptics_play(HAPTIC_CONFIRM);
-    app_cmd_t cmd = { .kind = CMD_TONIGHT_REVERT, .zone = ZONE_A };
+    app_state_t st;
+    dial_state_get(&st);
+    app_cmd_t cmd = { .kind = CMD_TONIGHT_REVERT, .zone = dial_state_primary_zone(&st) };
     dial_cmd_post(&cmd);
 }
 
