@@ -61,6 +61,16 @@ board bring-up notes, and firmware architecture live in
 
 ## License
 
-[MIT](LICENSE) © 2026 Chris Meyer. Third-party components used by the
-firmware are under their own licenses — see
+[PolyForm Noncommercial 1.0.0](LICENSE) © 2026 Chris Meyer. Free to use,
+build, modify, and share for **personal and other noncommercial
+purposes**. Any commercial use — selling devices or software built on
+this project, or using it in or for a business — requires a separate
+commercial license: open a GitHub issue to ask. Third-party components
+used by the firmware are under their own licenses — see
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
+## Contributing
+
+Contributions are welcome. By submitting one you agree it's licensed to
+the project maintainer under terms that let the project be licensed as
+above, including commercially.

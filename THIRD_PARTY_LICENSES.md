@@ -1,11 +1,11 @@
 # Third-Party Licenses
 
-This project's own code is © 2026 Chris Meyer, licensed under the MIT
-License (see [`LICENSE`](LICENSE)). It builds on hardware bring-up code,
-fonts, data, and libraries from other sources, each under its own terms.
-This file inventories those third-party components. The MIT grant on this
-repository covers this project's original work only, and does not relicense
-the vendor-derived files listed below.
+This project's own code is © 2026 Chris Meyer, licensed under the
+PolyForm Noncommercial License 1.0.0 (see [`LICENSE`](LICENSE)). It builds
+on hardware bring-up code, fonts, data, and libraries from other sources,
+each under its own terms. This file inventories those third-party
+components. The license on this repository covers this project's original
+work only, and does not relicense the third-party files listed below.
 
 ## Rotary knob decoder — `bidi_switch_knob.c` / `.h`
 
