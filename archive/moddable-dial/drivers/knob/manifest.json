@@ -1,0 +1,11 @@
+{
+  "modules": {
+    "*": "./*"
+  },
+  "preload": ["knob"],
+  "platforms": {
+    "esp32": {
+      "dependency": [{ "idf": "esp_driver_gpio" }, { "idf": "esp_timer" }]
+    }
+  }
+}

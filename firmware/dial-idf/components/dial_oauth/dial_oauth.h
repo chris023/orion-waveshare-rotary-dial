@@ -4,7 +4,7 @@
 
 /*
  * OAuth 2.1 client for the Orion MCP server (https://mcp.orionsleep.com/),
- * ported from firmware/reference-dial/dial.ts. Public client, PKCE (S256),
+ * ported from archive/reference-dial/dial.ts. Public client, PKCE (S256),
  * Dynamic Client Registration, tokens persisted in NVS.
  *
  * This header currently exposes the non-interactive foundation:

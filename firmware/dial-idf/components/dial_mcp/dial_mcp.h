@@ -5,7 +5,7 @@
 /*
  * Raw MCP client over Streamable HTTP for the Orion server
  * (https://mcp.orionsleep.com/). Port of the RawMcp class in
- * firmware/reference-dial/dial.ts.
+ * archive/reference-dial/dial.ts.
  *
  * One esp_http_client POST per JSON-RPC call: sends the Bearer access token
  * (from dial_oauth), Accept: application/json + text/event-stream, captures the

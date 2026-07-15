@@ -1,5 +1,5 @@
 /*
- * OAuth 2.1 client for the Orion MCP server. Port of firmware/reference-dial/
+ * OAuth 2.1 client for the Orion MCP server. Port of archive/reference-dial/
  * dial.ts (steps 1-2 + PKCE here; authorize/token next). Raw HTTP via
  * esp_http_client + the IDF cert bundle; JSON via cJSON; PKCE via mbedTLS.
  */

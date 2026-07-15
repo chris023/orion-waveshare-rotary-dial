@@ -29,3 +29,14 @@ npm-debug.log*
 .vscode/*
 !.vscode/extensions.json
 *.swp
+
+# Device flash backups (per-unit dumps contain NVS data such as BT bonding keys
+# and must never be published; keep them local-only)
+firmware/backups/*.bin
+
+# Archived experiments: never track their generated ESP-IDF/build output
+archive/**/build/
+archive/**/managed_components/
+archive/**/sdkconfig
+archive/**/sdkconfig.old
+archive/**/dependencies.lock
