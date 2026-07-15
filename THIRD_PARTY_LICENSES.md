@@ -10,9 +10,9 @@ the vendor-derived files listed below.
 ## Rotary knob decoder — `bidi_switch_knob.c` / `.h`
 
 - **What:** Quadrature decoder driving the rotary knob input.
-- **Where:** `firmware/dial-idf/components/dial_knob/`, with earlier copies
-  retained for history in `archive/dial-idf-companion/main/` and
-  `archive/moddable-dial/drivers/knob/`.
+- **Where:** `firmware/dial-idf/components/dial_knob/`. Earlier copies existed
+  in this project's now-removed prototype directories; they're preserved in
+  this repo's git history.
 - **Origin:** Espressif's `iot_knob` decoder (the `knob` component in
   `esp-iot-solution`), as vendored into Waveshare's `04_Encoder_Test` demo
   for this board, with a small modification credited in-file to "planevina"
@@ -63,29 +63,6 @@ the vendor-derived files listed below.
   `firmware/dial-idf/components/dial_time/dial_time.c:17`).
 - **License:** MIT License (per that repository's `LICENSE` file).
 - **Link:** https://github.com/nayarsystems/posix_tz_db
-
-## Archived: ST77916 display driver (`archive/moddable-dial/drivers/st77916/`)
-
-Kept for history only — not part of the shipped dial-idf firmware.
-
-- **What:** QSPI driver for the ST77916 display controller, plus a
-  panel-specific init sequence and a Moddable XS native wrapper.
-- **Origin/license, by file:**
-  - `esp_lcd_st77916.h`, `esp_lcd_st77916_spi.c`, `esp_lcd_st77916_interface.h`
-    — Espressif's `esp_lcd_st77916` vendor component, vendored in whole.
-    SPDX header: `SPDX-FileCopyrightText: 2023[-2025] Espressif Systems
-    (Shanghai) CO LTD` / `SPDX-License-Identifier: Apache-2.0`.
-  - `st77916_init.h` — this project's own panel init table, ported from
-    ESPHome's `mipi_spi` model `JC3636W518V2`
-    (`esphome/components/mipi_spi/models/jc.py`) per its own file header.
-    ESPHome dual-licenses its codebase: Python component definitions
-    (including this model file) under MIT, C++/runtime code under GPLv3.
-    As a ported `.py`-sourced model, this falls under ESPHome's MIT terms.
-  - `modST77916.c` — this project's own Moddable-SDK glue code (no
-    third-party header; wraps the Espressif component above).
-- **Link:** https://github.com/espressif/esp-iot-solution/tree/master/components/display/lcd/esp_lcd_st77916
-  and
-  https://github.com/esphome/esphome/blob/dev/esphome/components/mipi_spi/models/jc.py
 
 ## Build-time managed components (fetched by `idf.py`, not vendored)
 

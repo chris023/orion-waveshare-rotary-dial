@@ -1,6 +1,7 @@
 /*
  * Raw MCP client over Streamable HTTP for Orion. See dial_mcp.h.
- * Port of the RawMcp class in archive/reference-dial/dial.ts.
+ * Port of the RawMcp class in the project's earlier TypeScript prototype
+ * (reference-dial/dial.ts, in repo history).
  */
 
 #include "dial_mcp.h"

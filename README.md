@@ -55,9 +55,9 @@ board bring-up notes, and firmware architecture live in
 
 - [`firmware/dial-idf/`](firmware/dial-idf/) — the product: the ESP-IDF (C)
   firmware that actually ships.
-- [`archive/`](archive/) — superseded prototypes and bring-up experiments,
-  kept for history; see [archive/README.md](archive/README.md). Nothing in
-  there is needed to build or run the dial.
+- Earlier prototypes (a TypeScript/Node hub, a Moddable display attempt,
+  hardware bring-up probes) have been removed from the tree; they're
+  preserved in this repo's git history, not needed to build or run the dial.
 
 ## License
 

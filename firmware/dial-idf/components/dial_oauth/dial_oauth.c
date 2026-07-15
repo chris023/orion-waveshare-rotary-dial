@@ -1,6 +1,7 @@
 /*
- * OAuth 2.1 client for the Orion MCP server. Port of archive/reference-dial/
- * dial.ts (steps 1-2 + PKCE here; authorize/token next). Raw HTTP via
+ * OAuth 2.1 client for the Orion MCP server. Port of the project's earlier
+ * TypeScript prototype (reference-dial/dial.ts, in repo history); steps 1-2
+ * + PKCE here, authorize/token next. Raw HTTP via
  * esp_http_client + the IDF cert bundle; JSON via cJSON; PKCE via mbedTLS.
  */
 

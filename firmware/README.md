@@ -25,15 +25,14 @@
 The current firmware ([`dial-idf`](dial-idf/)) is built on Waveshare's own
 `ESP32-S3-Knob-Touch-LCD-1.8` ESP-IDF demo, whose display bring-up uses
 Espressif's `esp_lcd_sh8601` component, and it boots and renders on real
-hardware. An earlier prototype (the abandoned [Moddable
-attempt](../archive/moddable-dial), see its
-[`drivers/st77916/README.md`](../archive/moddable-dial/drivers/st77916/README.md))
-was written against a different assumption — that this exact board used an
-**ST77916** controller, reserving SH8601 for a separate 1.85" AMOLED variant.
-That assumption predates having Waveshare's own demo in hand; the panel this
-firmware ships against is confirmed driven via the SH8601 command set, not
-ST77916. If you're bringing up a unit and LVGL renders garbage, that's the
-first thing to double check against your specific board revision.
+hardware. An earlier prototype (the abandoned Moddable attempt, removed from
+the tree — see this repo's git history) was written against a different
+assumption — that this exact board used an **ST77916** controller, reserving
+SH8601 for a separate 1.85" AMOLED variant. That assumption predates having
+Waveshare's own demo in hand; the panel this firmware ships against is
+confirmed driven via the SH8601 command set, not ST77916. If you're bringing
+up a unit and LVGL renders garbage, that's the first thing to double check
+against your specific board revision.
 
 ## References
 

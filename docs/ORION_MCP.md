@@ -2,13 +2,15 @@
 
 > **Historical note:** this document captures the original discovery research
 > into Orion's MCP server and OAuth flow, done for what was then the hub
-> architecture (a TypeScript/Node service; see [archive/ts-hub](../archive/ts-hub)).
-> That architecture has since been superseded — the current firmware
+> architecture (a TypeScript/Node service). That architecture has since been
+> superseded — the current firmware
 > ([firmware/dial-idf](../firmware/dial-idf)) talks to Orion directly from the
-> device instead of through a hub. The API findings below (endpoints, OAuth
-> flow, tool surface) remain valid and are what the on-device firmware
-> implements; only the client-side code references (paths under `src/`) are
-> specific to the old, archived hub.
+> device instead of through a hub. The hub's code has been removed from the
+> tree; it and its CLI tools (`orion-login`, `orion-tools`) can be found in
+> this repo's git history. The API findings below (endpoints, OAuth flow,
+> tool surface) remain valid and are what the on-device firmware implements;
+> only the client-side code references (paths under `src/`) are specific to
+> the old, removed hub.
 
 Orion Sleep exposes an **official MCP server** — so the client controls the
 topper through the Model Context Protocol, authenticated with OAuth 2.1.
@@ -38,28 +40,29 @@ Probing `https://mcp.orionsleep.com/` (2026-07):
 So: **Authorization Code + PKCE**, with **Dynamic Client Registration** — the hub
 registers itself automatically; you just approve it once in the browser.
 
-## How the (archived) hub connected
+## How the (removed) hub connected
 
-`OrionMcpClient` (`archive/ts-hub/src/device/orion/mcp-client.ts`) uses the
-official `@modelcontextprotocol/sdk`:
+`OrionMcpClient` (`src/device/orion/mcp-client.ts` in the removed hub) used
+the official `@modelcontextprotocol/sdk`:
 
 - `StreamableHTTPClientTransport(new URL(ORION_MCP_URL), { authProvider })`
-- `OrionOAuthProvider` (`archive/ts-hub/src/device/orion/oauth-provider.ts`)
-  implements the SDK's `OAuthClientProvider`, persisting the registered client
-  + tokens + PKCE verifier to `ORION_TOKENS_FILE` (default
+- `OrionOAuthProvider` (`src/device/orion/oauth-provider.ts` in the removed
+  hub) implemented the SDK's `OAuthClientProvider`, persisting the registered
+  client + tokens + PKCE verifier to `ORION_TOKENS_FILE` (default
   `./secrets/orion-oauth.json`, gitignored).
 
 This same OAuth dance (discovery, Dynamic Client Registration, PKCE
 authorize/token, refresh) is what `firmware/dial-idf/components/dial_oauth`
 now does on-device — see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-The CLI tools below still work today for poking the Orion MCP API from a
-computer; run them from `archive/ts-hub` (`npm install` first):
+The hub's code has been removed from the tree. The CLI tools below
+(`orion-login`, `orion-tools`) for poking the Orion MCP API from a computer
+directly can be found, along with the rest of the hub, in this repo's git
+history — check out the hub and `npm install` first to run them again:
 
 ### One-time login
 
 ```bash
-cd archive/ts-hub
 npm run orion:login
 ```
 
@@ -79,13 +82,13 @@ The exact **tool names and input/output schemas** the server exposes are only
 visible once authenticated. After logging in:
 
 ```bash
-cd archive/ts-hub
 npm run orion:tools
 ```
 
 This prints all 17 tools with their JSON input schemas.
 
-The tool mapping is **confirmed** (`archive/ts-hub/src/device/orion/tool-map.ts`):
+The tool mapping is **confirmed** (`src/device/orion/tool-map.ts` in the
+removed hub):
 `list_devices`, `get_device_state`, `set_zone` (both temperature and power),
 `start_thermal_relief`. Override any name via `ORION_TOOLS` if Orion renames
 them. The current firmware calls the same tools directly — see
@@ -110,7 +113,8 @@ should be confirmed with a `DIAL_READ=1 npm run dial:ref` run and tightened in
 `parseDeviceState()` if they differ.
 
 Keep `DEVICE_CLIENT=fake` (the default) to develop the dial UX against the
-in-memory topper simulator + the virtual dial (`archive/ts-hub/simulator/`).
+in-memory topper simulator + the virtual dial (the removed hub's
+`simulator/` directory, see git history).
 
 ## Security notes
 
