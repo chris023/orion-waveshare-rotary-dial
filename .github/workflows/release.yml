@@ -1,0 +1,44 @@
+# A tag "dial-vX.Y.Z" builds firmware/dial-idf and publishes build/orion-dial.bin
+# to a GitHub Release; dial_ota.c polls that release's tag_name/asset to decide
+# whether a device should update, so the tag must match CMakeLists.txt's PROJECT_VER.
+name: release
+
+on:
+  push:
+    tags:
+      - 'dial-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches PROJECT_VER
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#dial-v}"
+          PROJECT_VER="$(grep -oP 'set\(PROJECT_VER\s+"\K[^"]+' firmware/dial-idf/CMakeLists.txt)"
+          if [ -z "$PROJECT_VER" ]; then
+            echo "::error::Could not find PROJECT_VER in firmware/dial-idf/CMakeLists.txt"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$PROJECT_VER" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME (version $TAG_VERSION) does not match PROJECT_VER $PROJECT_VER in firmware/dial-idf/CMakeLists.txt"
+            exit 1
+          fi
+          echo "Tag version $TAG_VERSION matches PROJECT_VER $PROJECT_VER"
+
+      - name: Build firmware (firmware/dial-idf)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0
+          target: esp32s3
+          path: 'firmware/dial-idf'
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: firmware/dial-idf/build/orion-dial.bin

@@ -1,107 +1,66 @@
 # orion-waveshare-rotary-dial
 
-Control an **[Orion Sleep](https://orionsleep.com) dual-zone liquid-cooled
-mattress topper** with physical **Waveshare ESP32-S3 rotary knob dials** — turn a
-knob to set each side's temperature, tap to toggle it on/off, and see the current
-state on the knob's round screen.
+> **Not affiliated with, endorsed by, or supported by Orion Sleep or Waveshare.**
+> This is an independent, community-built project.
 
-> **Status:** early scaffold. The hub runs end-to-end today against a built-in
-> topper **simulator** and a **mock** dial, with a full test suite. Talking to the
-> real Orion hardware needs a one-time `orion:login` and finalizing the tool
-> mapping (see below); flashing the real dials needs the firmware in `firmware/`.
+Turn a knob to change the temperature of your side of the bed. This project
+turns a **Waveshare ESP32-S3 round touch-LCD knob** into a standalone bedside
+dial for an **[Orion Sleep](https://orionsleep.com) dual-zone mattress
+topper** — no phone app, no hub on your network, no cloud service to run
+yourself. The dial talks to Orion directly, over Wi-Fi you already have.
 
-## How it works
+<!-- TODO: photo of the flashed dial on a nightstand -->
 
-Two cooperating pieces (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)):
+## Hardware required
 
-1. **The hub** — this repo, a **TypeScript / Node 20** service. It receives dial
-   events over MQTT, maps them to per-zone commands, and drives the topper via
-   **Orion's official MCP server** (`https://mcp.orionsleep.com/`, OAuth 2.1). It
-   also pushes state back to each dial's display.
-2. **The dials** — Waveshare **ESP32-S3-Knob-Touch-LCD-1.8** boards running their
-   own firmware ([firmware/](firmware/)), talking MQTT over Wi-Fi.
+- **Waveshare ESP32-S3-Knob-Touch-LCD-1.8** — the round 1.8" touch-LCD knob
+  board (ESP32-S3, rotary encoder + capacitive touch + haptics). See
+  [firmware/README.md](firmware/README.md) for the full parts table.
+- An Orion Sleep dual-zone topper on the same 2.4 GHz Wi-Fi network, and an
+  Orion account.
 
-```
-knob dial (ESP32-S3)  ──MQTT──►  Node/TS hub  ──MCP/OAuth──►  Orion Sleep cloud ──►  topper
-        ▲                            │
-        └────── display state ───────┘
-```
+One dial covers one side of the bed; run two if you want independent control
+of both zones.
 
-The design is **ports-and-adapters**, so both the hardware and the cloud are
-swappable and the whole thing runs with **no hardware and no Orion account** for
-development and CI.
+## Quick start
 
-## Quick start (no hardware needed)
+Everything else — Wi-Fi setup, pairing your Orion account, choosing a side —
+happens on the device itself after first boot. To build and flash:
 
 ```bash
-npm install
-npm run check      # typecheck + lint + tests
-npm run dev        # runs the hub with a MOCK dial + FAKE topper simulator
+idf.py set-target esp32s3
+idf.py build
+idf.py -p <PORT> flash
 ```
 
-By default (`DIAL_TRANSPORT=mock`, `DEVICE_CLIENT=fake`) it wires up two dials —
-`dial-left` and `dial-right` — against an in-memory dual-zone topper.
+That needs **ESP-IDF v6.0** installed first. Full build/flash instructions,
+board bring-up notes, and firmware architecture live in
+[firmware/dial-idf/README.md](firmware/dial-idf/README.md).
 
-Copy `.env.example` to `.env` and tweak as needed:
+## Features
 
-```bash
-cp .env.example .env
-node --env-file=.env dist/main.js   # after `npm run build`
-```
+- **On-device Wi-Fi setup** — join over a phone-browser captive portal, or
+  pick a network and type a password with the knob, no app required.
+- **Own-account Orion pairing** — scan a QR code, approve in your phone's
+  browser, done. The dial registers itself as an OAuth client (no shared
+  secret baked into the firmware).
+- **Dual-zone control** — a side picker switches which half of the bed the
+  knob is turning.
+- **°F or °C** — pick your unit in settings.
+- **OTA updates** — checks GitHub Releases for new firmware and installs
+  over the air.
+- **Factory reset** — tap-twice-confirm in settings to unpair and start over.
 
-## Connecting the real Orion topper
+## Repo layout
 
-Orion is controlled through its official MCP server — no reverse engineering.
-Full details in [docs/ORION_MCP.md](docs/ORION_MCP.md).
-
-```bash
-npm run orion:login    # one-time browser OAuth; saves tokens to ./secrets/ (gitignored)
-npm run orion:tools    # prints the MCP tools + schemas the server exposes
-```
-
-Then set `DEVICE_CLIENT=orion`, and (if the tool names differ from the defaults)
-set `ORION_TOOLS` and adjust the argument/response mapping in
-`src/device/orion/mcp-client.ts`.
-
-## Connecting real dials
-
-Flash each ESP32-S3 knob from [`firmware/`](firmware/) (an ESPHome starter is in
-`firmware/esphome/orion-knob.yaml`), point it at the hub's MQTT broker, and give
-it a unique `dial_id`. Run an embedded broker on the hub with
-`BROKER_MODE=embedded`, or use a standalone Mosquitto. Map dials to zones with
-`DIAL_BINDINGS` (see `.env.example`).
-
-## Configuration
-
-All config is validated at startup (`src/config/env.ts`). Key vars:
-
-| Var | Default | Meaning |
-|-----|---------|---------|
-| `DIAL_TRANSPORT` | `mock` | `mock` or `mqtt` |
-| `DEVICE_CLIENT` | `fake` | `fake` simulator or real `orion` |
-| `MQTT_URL` | `mqtt://localhost:1883` | broker the dials use |
-| `BROKER_MODE` | `none` | `embedded` runs an in-process MQTT broker |
-| `ORION_MCP_URL` | `https://mcp.orionsleep.com/` | Orion MCP endpoint |
-| `TEMP_MIN_F` / `TEMP_MAX_F` / `TEMP_STEP_F` | `55` / `115` / `1` | dial range (°F) |
-| `WRITE_DEBOUNCE_MS` | `300` | coalesce a fast spin into one write |
-| `DIAL_BINDINGS` | left+right | which dial controls which zone |
-
-## Scripts
-
-| Command | What |
-|---------|------|
-| `npm run dev` | run the hub with hot reload |
-| `npm run check` | typecheck + lint + test |
-| `npm test` | run the Vitest suite |
-| `npm run build` | compile to `dist/` |
-| `npm run orion:login` | one-time Orion OAuth login |
-| `npm run orion:tools` | list Orion MCP tools + schemas |
-
-## Tech
-
-TypeScript (ESM, Node 20) · MQTT (`mqtt` / `aedes`) · `@modelcontextprotocol/sdk`
-· `zod` · `pino` · Vitest · Biome.
+- [`firmware/dial-idf/`](firmware/dial-idf/) — the product: the ESP-IDF (C)
+  firmware that actually ships.
+- [`archive/`](archive/) — superseded prototypes and bring-up experiments,
+  kept for history; see [archive/README.md](archive/README.md). Nothing in
+  there is needed to build or run the dial.
 
 ## License
 
-[MIT](LICENSE) © 2026 Chris Meyer
+[MIT](LICENSE) © 2026 Chris Meyer. Third-party components used by the
+firmware are under their own licenses — see
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

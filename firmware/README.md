@@ -1,68 +1,41 @@
-# Dial firmware (Waveshare ESP32-S3-Knob-Touch-LCD-1.8)
+# firmware/
 
-Each physical dial runs firmware on its ESP32-S3 that:
+- **[`dial-idf/`](dial-idf/)** — the firmware. Native ESP-IDF (C) for the
+  Waveshare ESP32-S3-Knob-Touch-LCD-1.8 dial: Wi-Fi, OAuth 2.1, and MCP-over-HTTPS
+  all on-device. See [`dial-idf/README.md`](dial-idf/README.md) to build and flash.
+- **[`backups/`](backups/)** — local-only flash dumps of specific physical
+  units (companion-chip factory image, etc.), for restoring a unit to its
+  out-of-box state. The `.bin` files are gitignored; only the README here is
+  tracked. Not needed to build or run the product.
 
-1. reads the **rotary encoder** (turn) and **capacitive touch** (tap/long-press),
-2. publishes those as MQTT events to the hub,
-3. subscribes to display updates and renders the current zone temperature/state
-   on its round LCD.
-
-> The hub (this repo, in `src/`) is written in TypeScript. The firmware is a
-> separate concern that runs on the device. Two supported paths are below.
-
-## Board facts (from research — verify against your unit's wiki)
+## Board facts
 
 | Part | Detail |
 |------|--------|
+| Board | **Waveshare ESP32-S3-Knob-Touch-LCD-1.8** (Guition JC3636K518) |
 | MCU | ESP32-S3R8 (8 MB PSRAM, 16 MB flash) + companion ESP32-U4WDH |
-| Display | 1.8" **round** 360×360 IPS, **ST77916** controller over **QSPI**, LVGL |
-| Display pins | CS=14, CLK=13, DATA=15/16/17/18, RST=21, backlight(PWM)=47 |
-| Rotary encoder | incremental A/B quadrature: **pin_a=GPIO8, pin_b=GPIO7** (not magnetic) |
+| Display | 1.8" **round** 360×360 panel over **QSPI**, driven by the **SH8601** command set (`esp_lcd_sh8601`), LVGL |
+| Display pins | CS=14, CLK=13, DATA=15/16/17/18, RST=21, backlight (PWM)=47 |
+| Rotary encoder | incremental A/B quadrature: **pin_a=GPIO8, pin_b=GPIO7** (not magnetic; only live under full board init) |
 | Knob click | **none** — GPIO0 is the boot button; use a touchscreen **tap** instead |
-| Touch | **CST816S/T** over I²C: SDA=11, SCL=12, INT=9, RST=10 |
+| Touch | **CST816** over I²C: SDA=11, SCL=12, INT=9, RST=10 |
 | Haptics | DRV2605 LRA driver @ I²C 0x5A |
-| Audio | PCM5100A I²S DAC + MEMS mic (no speaker) |
+| Audio | PCM5100A I²S DAC + MEMS mic (not used by this firmware) |
 
-The encoder's phase behavior is slightly non-standard, so ESPHome's stock
-`rotary_encoder` can miscount — the community uses a custom polling component.
-See the references below.
-
-## MQTT wire protocol (must match `src/hardware/protocol.ts`)
-
-Base topic defaults to `orion-dials`; each dial has a unique `<dialId>`.
-
-- **Device → hub**, topic `orion-dials/<dialId>/event`:
-  ```json
-  {"type":"rotate","dir":"cw","steps":1}
-  {"type":"rotate","dir":"ccw","steps":1}
-  {"type":"tap"}
-  {"type":"longpress"}
-  ```
-- **Hub → device**, topic `orion-dials/<dialId>/display` (retained):
-  ```json
-  {"label":"LEFT","power":"on","target":72,"current":70,"active":true,"offline":false}
-  ```
-- **Device → hub**, topic `orion-dials/<dialId>/status`: last-will `online`/`offline`.
-
-Point each dial at the hub's broker. Run an embedded broker on the hub with
-`BROKER_MODE=embedded` (default port 1883), or use a standalone Mosquitto.
-
-## Path A — ESPHome (recommended, least code)
-
-Working community configs already exist for this board. Start from
-[`esphome/orion-knob.yaml`](./esphome/orion-knob.yaml), set your Wi-Fi + MQTT
-broker (the hub) and a unique `dial_id` per device, then flash with ESPHome.
-This gets encoder + touch + MQTT working quickly; the LVGL round-display UI is
-the main thing to build out (see references).
-
-## Path B — Arduino / ESP-IDF + LVGL (full control)
-
-Use Waveshare's official examples for the display/LVGL, add the encoder + touch
-handlers, and an MQTT client (`PubSubClient` / `ArduinoMqttClient`) that speaks
-the protocol above.
+The current firmware ([`dial-idf`](dial-idf/)) is built on Waveshare's own
+`ESP32-S3-Knob-Touch-LCD-1.8` ESP-IDF demo, whose display bring-up uses
+Espressif's `esp_lcd_sh8601` component, and it boots and renders on real
+hardware. An earlier prototype (the abandoned [Moddable
+attempt](../archive/moddable-dial), see its
+[`drivers/st77916/README.md`](../archive/moddable-dial/drivers/st77916/README.md))
+was written against a different assumption — that this exact board used an
+**ST77916** controller, reserving SH8601 for a separate 1.85" AMOLED variant.
+That assumption predates having Waveshare's own demo in hand; the panel this
+firmware ships against is confirmed driven via the SH8601 command set, not
+ST77916. If you're bringing up a unit and LVGL renders garbage, that's the
+first thing to double check against your specific board revision.
 
 ## References
 
 - Waveshare wiki: https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8
-- ESPHome community config (encoder/display/haptics): https://github.com/KrX3D/WaveShare-Knob-Esp32S3
 - Board notes / esptool dumps: https://github.com/nkinnan/Waveshare-ESP32-S3-Knob-Touch-LCD-1.8_and_Guition-K5-Knob-Series-JC3636K518
