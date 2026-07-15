@@ -1,4 +1,4 @@
-name: CI
+name: ci
 
 on:
   push:
@@ -7,26 +7,14 @@ on:
     branches: [main]
 
 jobs:
-  check:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Build firmware (firmware/dial-idf)
+        uses: espressif/esp-idf-ci-action@v1
         with:
-          node-version: 20
-          cache: npm
-
-      - run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
-        run: npm test
-
-      - name: Build
-        run: npm run build
+          esp_idf_version: v6.0
+          target: esp32s3
+          path: 'firmware/dial-idf'
