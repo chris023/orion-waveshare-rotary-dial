@@ -1,4 +1,4 @@
 dependencies:
   # cJSON was removed from core ESP-IDF in v6.0; pull the official registry copy
   # (same dependency dial_oauth already declares -- idf.py reuses the fetch).
-  espressif/cjson: "*"
+  espressif/cjson: "1.7.19"

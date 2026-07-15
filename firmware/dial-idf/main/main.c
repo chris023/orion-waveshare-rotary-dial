@@ -36,7 +36,16 @@
 #include "dial_palette.h"
 #include "dial_ota.h"
 #include "bidi_switch_knob.h"
+// secrets.h is an optional dev convenience (git-ignored) that pre-seeds Wi-Fi
+// creds so a developer build skips on-device provisioning; a fresh clone has
+// none, and WIFI_SSID falls back to dial_net_seed's own placeholder string so
+// the seed is a provable no-op and the dial provisions on-device as normal.
+#if __has_include("secrets.h")
 #include "secrets.h"
+#else
+#define WIFI_SSID     "your-wifi-ssid"
+#define WIFI_PASSWORD ""
+#endif
 #include "cJSON.h"
 
 static const char *TAG = "app";
@@ -449,6 +458,12 @@ static bool s_ui_clock_valid;
 
 static char s_serial[16];
 
+// Set by orion_discover_device: list_devices answered (no transport/auth
+// failure) but the account has no topper registered at all. Distinct from
+// every other discovery failure, which is why the supervisor loop below
+// gives it its own phase_err instead of dial_mcp_last_error()'s generic text.
+static bool s_no_orion_devices;
+
 // zone -> Orion user uuid (list_devices zones[].user.id), captured once in
 // orion_discover_device. get_sleep_schedules keys its "schedules" object by
 // this same uuid, so it's how orion_refresh_schedules matches a schedule
@@ -669,6 +684,7 @@ static bool orion_set_away(void *arg)
 
 static bool orion_discover_device(void)
 {
+    s_no_orion_devices = false;
     char *devices = NULL;
     if (!dial_mcp_call_tool("list_devices", "{}", &devices) || !devices) return false;
 
@@ -679,6 +695,12 @@ static bool orion_discover_device(void)
     bool ok = false;
     cJSON *arr  = cJSON_GetObjectItem(root, "devices");
     cJSON *dev0 = cJSON_IsArray(arr) ? cJSON_GetArrayItem(arr, 0) : NULL;
+    if (!dev0 && cJSON_IsArray(arr)) {
+        // list_devices is a well-formed, successful answer — the account
+        // just doesn't have a topper on it yet. Not a transport/auth error,
+        // so it shouldn't spin in the generic "unreachable" backoff forever.
+        s_no_orion_devices = true;
+    }
     if (dev0) {
         cJSON *serial = cJSON_GetObjectItem(dev0, "serial_number");
         if (serial && serial->valuestring) {
@@ -1062,7 +1084,11 @@ static void worker_task(void *arg)
 
         dial_state_set_phase(PH_MCP_CONNECTING, NULL);
         bool linked = dial_mcp_connect(NULL) && orion_discover_device();
-        if (!linked) {
+        // A bare, well-formed empty device list is an account problem, not a
+        // token problem — skip the refresh/re-link dance below and go
+        // straight to reporting it (still with the same retry/backoff, so a
+        // device added later is picked up on a subsequent pass).
+        if (!linked && !s_no_orion_devices) {
             // The token can be dead server-side while still looking usable here:
             // dial_oauth_have_valid_access() reports that an access token EXISTS,
             // not that it's still good, and the whole design leans on refreshing
@@ -1082,7 +1108,9 @@ static void worker_task(void *arg)
             }
         }
         if (!linked) {
-            dial_state_set_phase(PH_DEGRADED, dial_mcp_last_error());
+            dial_state_set_phase(PH_DEGRADED, s_no_orion_devices
+                ? "No Orion device on this account. Add your topper in the Orion app, then retry."
+                : dial_mcp_last_error());
             backoff_wait(backoff_s);
             backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
             continue;

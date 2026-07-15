@@ -1,3 +1,3 @@
 dependencies:
   # cJSON was removed from core ESP-IDF in v6.0; pull the official registry copy.
-  espressif/cjson: "*"
+  espressif/cjson: "1.7.19"
