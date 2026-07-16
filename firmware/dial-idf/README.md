@@ -20,6 +20,12 @@ Orion's servers) runs on the dial itself.
 
 ## Prerequisites
 
+Just want to run the dial, not build it? Flash prebuilt firmware from your
+browser at
+[https://chris023.github.io/orion-waveshare-rotary-dial/](https://chris023.github.io/orion-waveshare-rotary-dial/)
+— no toolchain needed. The rest of this README is for building or modifying
+the firmware yourself.
+
 This firmware is pinned to **ESP-IDF v6.0**, target **esp32s3**. Install it
 with Espressif's standard flow (no project-specific scripts needed):
 
@@ -135,11 +141,13 @@ itself:
   process.
 - **Menu → About:** firmware version, IDF version, device serial, and
   **Software update** — see OTA below.
-- **OTA updates:** the dial periodically checks this repo's GitHub releases
-  for a newer firmware build (a `dial-vX.Y.Z` tag with an `orion-dial.bin`
-  asset). It only ever *checks* on its own; installing always needs a
-  tap-twice confirm on the About screen's Software update row. The currently
-  running version is shown there and on About's Firmware row.
+- **OTA updates:** however the dial got its first flash — browser or
+  USB — everything after that arrives OTA. The dial periodically checks
+  this repo's GitHub releases for a newer firmware build (a `dial-vX.Y.Z`
+  tag with an `orion-dial.bin` asset). It only ever *checks* on its own;
+  installing always needs a tap-twice confirm on the About screen's
+  Software update row. The currently running version is shown there and on
+  About's Firmware row.
 
 ## Troubleshooting / FAQ
 

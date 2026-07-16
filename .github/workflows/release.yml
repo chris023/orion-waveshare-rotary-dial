@@ -1,6 +1,11 @@
 # A tag "dial-vX.Y.Z" builds firmware/dial-idf and publishes build/orion-dial.bin
 # to a GitHub Release; dial_ota.c polls that release's tag_name/asset to decide
 # whether a device should update, so the tag must match CMakeLists.txt's PROJECT_VER.
+# The same build also produces a merged single-file image (bootloader + partition
+# table + otadata + app, flashable from offset 0x0) via `esptool merge_bin`, which
+# is attached to the release as orion-dial-merged.bin and deployed to GitHub Pages
+# (gh-pages branch) at firmware/latest/orion-dial-merged.bin so the browser-based
+# ESP Web Tools flasher page (web-flasher/) always points at the latest build.
 name: release
 
 on:
@@ -31,14 +36,50 @@ jobs:
           fi
           echo "Tag version $TAG_VERSION matches PROJECT_VER $PROJECT_VER"
 
-      - name: Build firmware (firmware/dial-idf)
+      - name: Build firmware and merge flashable image (firmware/dial-idf)
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v6.0
           target: esp32s3
           path: 'firmware/dial-idf'
+          command: idf.py build && cd build && python -m esptool --chip esp32s3 merge_bin -o orion-dial-merged.bin @flash_args
+
+      - name: Upload merged image for the Pages job
+        uses: actions/upload-artifact@v4
+        with:
+          name: orion-dial-merged
+          path: firmware/dial-idf/build/orion-dial-merged.bin
+          retention-days: 1
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: firmware/dial-idf/build/orion-dial.bin
+          files: |
+            firmware/dial-idf/build/orion-dial.bin
+            firmware/dial-idf/build/orion-dial-merged.bin
+
+  deploy-pages:
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download merged image
+        uses: actions/download-artifact@v4
+        with:
+          name: orion-dial-merged
+          path: /tmp/orion-dial-merged
+
+      - name: Assemble Pages site
+        run: |
+          mkdir -p _site/firmware/latest
+          cp web-flasher/index.html web-flasher/manifest.json _site/
+          cp /tmp/orion-dial-merged/orion-dial-merged.bin _site/firmware/latest/orion-dial-merged.bin
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_site
+          publish_branch: gh-pages
+          force_orphan: true
