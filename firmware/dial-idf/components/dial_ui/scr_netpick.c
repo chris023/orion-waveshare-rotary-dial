@@ -51,7 +51,7 @@ static lv_obj_t *make_row(lv_obj_t *parent, const char *label_txt, lv_event_cb_t
     lv_obj_t *lbl = lv_label_create(row);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, 0);
     lv_label_set_text(lbl, label_txt);
-    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_center(lbl);
 
     return row;
 }

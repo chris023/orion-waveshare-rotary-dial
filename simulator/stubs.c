@@ -104,10 +104,12 @@ const char *dial_net_ap_ssid(void) { return "OrionDial-A1B2"; }
 void dial_net_on_event(dial_net_event_cb_t cb) { (void)cb; }
 
 /* ---- esp_app_desc --------------------------------------------------------
- * Fixed "v1.0.0 / v6.0" identity for scr_about.c's Firmware/IDF rows. */
+ * Fixed "v1.0.1 / v6.0" identity for scr_about.c's Firmware/IDF rows —
+ * kept in step with firmware/dial-idf/CMakeLists.txt's PROJECT_VER so the
+ * simulator's about.png never shows a version the real firmware doesn't. */
 
 const esp_app_desc_t *esp_app_get_description(void)
 {
-    static const esp_app_desc_t desc = { .version = "1.0.0", .idf_ver = "v6.0" };
+    static const esp_app_desc_t desc = { .version = "1.0.1", .idf_ver = "v6.0" };
     return &desc;
 }
