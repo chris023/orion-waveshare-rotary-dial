@@ -103,28 +103,56 @@ const ui_screen_t scr_wifi_portal = {
 
 /* ---- Orion OAuth QR ---------------------------------------------------- */
 
-static lv_obj_t *s_oauth_qr, *s_oauth_lbl;
+// The code itself has to stay pure black-on-white no matter the hour — a
+// phone camera needs real contrast and an unbroken quiet zone, and the
+// dial's near-black night palette can't give it either. So unlike every
+// other screen, the card under the QR is hardcoded white; only the screen
+// behind it and the caption follow PAL() like everywhere else.
+//
+// Card padding is 24px on every side — comfortably more than four modules
+// at this QR's ~5px module scale (design-spec's own quiet-zone minimum) —
+// and the whole card sits just far enough below the caption, and well
+// inside the round panel's edge, to render without clipping either side.
+#define OAUTH_QR_SIZE    180
+#define OAUTH_CARD_PAD    24
+#define OAUTH_CARD_SIZE  (OAUTH_QR_SIZE + 2 * OAUTH_CARD_PAD)
+
+static lv_obj_t *s_oauth_card, *s_oauth_qr, *s_oauth_lbl;
 
 static void oauth_create(lv_obj_t *scr, void *arg)
 {
     (void)arg;
-    lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
+    const dial_palette_t *pal = PAL();
+    lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
     s_oauth_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_oauth_lbl, &lv_font_montserrat_16, 0);
     lv_label_set_text(s_oauth_lbl, "Scan to link your dial");
-    lv_obj_set_style_text_color(s_oauth_lbl, lv_color_hex(0x0b6a4a), 0);
     lv_obj_align(s_oauth_lbl, LV_ALIGN_TOP_MID, 0, 44);
 
-    s_oauth_qr = lv_qrcode_create(scr, 220, lv_color_black(), lv_color_white());
+    s_oauth_card = lv_obj_create(scr);
+    lv_obj_set_size(s_oauth_card, OAUTH_CARD_SIZE, OAUTH_CARD_SIZE);
+    lv_obj_set_style_radius(s_oauth_card, 20, 0);
+    lv_obj_set_style_border_width(s_oauth_card, 0, 0);
+    lv_obj_set_style_bg_opa(s_oauth_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_oauth_card, lv_color_white(), 0);
+    lv_obj_clear_flag(s_oauth_card, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_oauth_card, LV_ALIGN_CENTER, 0, 14);
+
+    s_oauth_qr = lv_qrcode_create(s_oauth_card, OAUTH_QR_SIZE, lv_color_black(), lv_color_white());
     lv_obj_center(s_oauth_qr);
 }
 
-static void oauth_destroy(void) { s_oauth_qr = s_oauth_lbl = NULL; }
+static void oauth_destroy(void) { s_oauth_card = s_oauth_qr = s_oauth_lbl = NULL; }
 
 static void oauth_on_state(const app_state_t *st)
 {
-    if (!s_oauth_qr || !st->oauth_url[0]) return;
-    lv_qrcode_update(s_oauth_qr, st->oauth_url, strlen(st->oauth_url));
+    if (!s_oauth_qr) return;
+    const dial_palette_t *pal = PAL();
+    lv_obj_set_style_bg_color(lv_obj_get_parent(s_oauth_card), pal->bg, 0);
+    lv_obj_set_style_text_color(s_oauth_lbl, pal->ink_secondary, 0);
+    if (st->oauth_url[0])
+        lv_qrcode_update(s_oauth_qr, st->oauth_url, strlen(st->oauth_url));
 }
 
 const ui_screen_t scr_oauth_qr = {
