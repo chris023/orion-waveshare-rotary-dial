@@ -39,7 +39,7 @@ work only, and does not relicense the third-party files listed below.
 - **License:** None stated by Waveshare. Provenance is disclosed here for
   transparency: this is vendor hardware-support code, © Waveshare, included
   because it's required to run this board's display/touch/I2C peripherals.
-  It is not this project's original work, and this repository's MIT grant
+  It is not this project's original work, and this repository's license
   does not purport to relicense it.
 - **Link:** https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8
 
@@ -76,6 +76,18 @@ transparency, not shipped as source in this repository:
 | `espressif/cjson` (cJSON) | 1.7.19~2 | MIT |
 | `espressif/esp_lcd_sh8601` | 2.0.1~1 | Apache-2.0 |
 | `espressif/cmake_utilities` | 0.5.3 | Apache-2.0 |
+
+## Image writer — `stb_image_write.h`
+
+- **What:** Single-file PNG encoder used to write the screenshot images the
+  desktop UI simulator produces.
+- **Where:** `simulator/vendor/stb_image_write.h`. Used only by the desktop
+  simulator build — it is not compiled into, or shipped in, the dial's own
+  firmware.
+- **Origin:** Sean Barrett's `stb` single-file public-domain libraries.
+- **License:** Dual-licensed, public domain **or** MIT, at the user's
+  option (per the license block in the file itself).
+- **Link:** https://github.com/nothings/stb
 
 ## `orion_root_ca.pem`
 

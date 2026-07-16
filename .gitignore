@@ -33,3 +33,6 @@ npm-debug.log*
 # Device flash backups (per-unit dumps contain NVS data such as BT bonding keys
 # and must never be published; keep them local-only)
 firmware/backups/*.bin
+
+# Desktop UI simulator build output (cmake -B build -S simulator)
+/build/
