@@ -212,6 +212,9 @@ bool dial_ota_download_and_apply(void (*progress_cb)(int pct))
         .cert_pem   = dial_oauth_root_ca(),
         .timeout_ms = 30000,
         .buffer_size = 4096,
+        /* GitHub 302s the asset to a signed URL ~900 bytes long; the default
+         * 512-byte TX buffer can't even fit the redirected request line. */
+        .buffer_size_tx = 4096,
     };
     esp_https_ota_config_t ota_cfg = { .http_config = &http_cfg };
 
