@@ -185,6 +185,11 @@ done:
     return ok;
 }
 
+void dial_ota_set_blocked(const char *reason)
+{
+    set_status(OTA_FAILED, NULL, reason);
+}
+
 /* ---- download + apply ---------------------------------------------------*/
 
 bool dial_ota_download_and_apply(void (*progress_cb)(int pct))

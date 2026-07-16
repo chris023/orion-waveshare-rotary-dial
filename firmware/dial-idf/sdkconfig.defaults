@@ -35,3 +35,7 @@ CONFIG_LV_USE_QRCODE=y
 # else the bootloader reverts to the previous slot on reboot.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+# No code calls esp_crt_bundle_attach() -- TLS verifies against the curated
+# PEM in dial_oauth instead (see orion_root_ca.pem's own note on why). Drop
+# the compiled-in bundle to reclaim flash.
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE is not set

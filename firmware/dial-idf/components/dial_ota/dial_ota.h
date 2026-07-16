@@ -54,6 +54,14 @@ bool dial_ota_check(void);
 // returns false. Worker task only.
 bool dial_ota_download_and_apply(void (*progress_cb)(int pct));
 
+// Records a FAILED status carrying a caller-supplied reason, without making
+// any network call -- for a caller that must withhold dial_ota_check() on a
+// precondition of its own (system clock not yet valid, notably: mbedTLS
+// needs a real wall clock to validate the GitHub/objects.githubusercontent.com
+// chains) but still owes the Settings row a clear reason instead of a
+// silent no-op. Worker task only (same discipline as dial_ota_check()).
+void dial_ota_set_blocked(const char *reason);
+
 // Call once after a healthy boot (the worker's "device linked" moment): if
 // the running image is still ESP_OTA_IMG_PENDING_VERIFY (booted straight
 // from an OTA install, rollback armed), mark it valid so the bootloader

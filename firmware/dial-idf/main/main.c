@@ -981,11 +981,19 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         nvs_flash_erase();
         esp_restart();
         break;
-    // Software update (M6), from Settings' "Software update" row.
-    case CMD_OTA_CHECK:
-        dial_ota_check();
+    // Software update (M6), from Settings' "Software update" row. Gated on
+    // clock_valid the same as the M6 auto-check above (dial_ota_check() is
+    // all HTTPS, and mbedTLS cert validation needs a real wall clock) — but
+    // a manual tap is a user waiting on feedback, not a background sweep, so
+    // a blocked check must say why rather than silently doing nothing.
+    case CMD_OTA_CHECK: {
+        app_state_t st;
+        dial_state_get(&st);
+        if (st.clock_valid) dial_ota_check();
+        else dial_ota_set_blocked("waiting for time sync - try again shortly");
         commit_ota_snapshot();
         break;
+    }
     case CMD_OTA_APPLY: {
         // Stale-tap guard: the row's confirm is only armed while AVAILABLE,
         // but the store could have moved on (an unrelated auto-check landed,
