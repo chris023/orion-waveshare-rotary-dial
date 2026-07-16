@@ -207,6 +207,19 @@ static void create(lv_obj_t *scr, void *arg)
     make_row(s_list, "Re-link Orion", row_relink_cb,        &s_val_confirm[CONFIRM_RELINK]);
     make_row(s_list, "Factory reset", row_factory_reset_cb, &s_val_confirm[CONFIRM_FACTORY]);
 
+    // "Tap again to confirm" is too long to share one line with "Re-link
+    // Orion"/"Factory reset" — right-aligned beside them it ran INTO them
+    // (same collision scr_about.c's Software update row had). So these two
+    // rows' value labels sit on a second left-aligned line under the label
+    // instead (scr_about.c's stacked treatment), width-capped with LONG_DOT.
+    // They hold "" except while armed, so every other state keeps the
+    // two-column label+value look of the rest of the list untouched.
+    for (int i = 0; i < CONFIRM_COUNT; i++) {
+        lv_obj_set_width(s_val_confirm[i], LV_PCT(100));
+        lv_label_set_long_mode(s_val_confirm[i], LV_LABEL_LONG_DOT);
+        lv_obj_align(s_val_confirm[i], LV_ALIGN_LEFT_MID, 0, 26);
+    }
+
     // Created AFTER the list so it draws over rows scrolling beneath it —
     // same fixed title slot the other menu sub-screens use.
     s_title_lbl = lv_label_create(scr);

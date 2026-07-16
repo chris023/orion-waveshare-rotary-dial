@@ -211,11 +211,28 @@ static void create(lv_obj_t *scr, void *arg)
 
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
 
+    // Unlike every other row's value ("v1.0.1", "--", ...), this one carries
+    // worker-driven prose that can run long ("Tap again to confirm", "v1.2.3
+    // available - tap to install", the ~40-char dial_ota_set_blocked reasons)
+    // — too long to sit beside "Software update" on one line without running
+    // into it (owner-reported overlap). So this row alone drops make_row's
+    // label-left/value-right split and stacks three left-aligned lines
+    // instead, each capped to the row's own content width with LONG_DOT so a
+    // pathological string ellipsizes rather than overlapping anything.
     lv_obj_t *ota_row = make_row(s_list, "Software update", row_ota_cb, &s_val_ota);
+    lv_obj_t *ota_lbl = lv_obj_get_child(ota_row, 0);
+    lv_obj_align(ota_lbl, LV_ALIGN_LEFT_MID, 0, -20);
+
+    lv_obj_set_width(s_val_ota, LV_PCT(100));
+    lv_label_set_long_mode(s_val_ota, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_val_ota, LV_ALIGN_LEFT_MID, 0, 6);
+
     s_ota_err_lbl = lv_label_create(ota_row);
     lv_obj_set_style_text_font(s_ota_err_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(s_ota_err_lbl, "");
-    lv_obj_align(s_ota_err_lbl, LV_ALIGN_RIGHT_MID, 0, 22);
+    lv_obj_set_width(s_ota_err_lbl, LV_PCT(100));
+    lv_label_set_long_mode(s_ota_err_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_ota_err_lbl, LV_ALIGN_LEFT_MID, 0, 26);
 
     lv_obj_t *fw_val, *idf_val;
     make_row(s_list, "Firmware", NULL, &fw_val);
