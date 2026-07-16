@@ -9,5 +9,5 @@ add_compile_options("-Wno-format")
 # against GitHub Releases' tag_name by dial_ota. Bump per release; the tag
 # pushed to GitHub ("dial-vX.Y.Z") must match this for the update check to
 # ever consider a release "current" once installed.
-set(PROJECT_VER "1.0.2")
+set(PROJECT_VER "1.0.3")
 project(orion-dial)
