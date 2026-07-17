@@ -77,6 +77,9 @@ transparency, not shipped as source in this repository:
 | `espressif/esp_lcd_sh8601` | 2.0.1~1 | Apache-2.0 |
 | `espressif/cmake_utilities` | 0.5.3 | Apache-2.0 |
 
+LVGL's bundled QR-code extra (used for the pairing screen) is Project
+Nayuki's `qrcodegen` (MIT), shipped inside the `lvgl/lvgl` component above.
+
 ## Image writer — `stb_image_write.h`
 
 - **What:** Single-file PNG encoder used to write the screenshot images the

@@ -2,7 +2,7 @@
 # to a GitHub Release; dial_ota.c polls that release's tag_name/asset to decide
 # whether a device should update, so the tag must match CMakeLists.txt's PROJECT_VER.
 # The same build also produces a merged single-file image (bootloader + partition
-# table + otadata + app, flashable from offset 0x0) via `esptool merge_bin`, which
+# table + otadata + app, flashable from offset 0x0) via `esptool merge-bin`, which
 # is attached to the release as orion-dial-merged.bin and deployed to GitHub Pages
 # (gh-pages branch) at firmware/latest/orion-dial-merged.bin so the browser-based
 # ESP Web Tools flasher page (web-flasher/) always points at the latest build.
@@ -42,7 +42,7 @@ jobs:
           esp_idf_version: v6.0
           target: esp32s3
           path: 'firmware/dial-idf'
-          command: idf.py build && cd build && python -m esptool --chip esp32s3 merge_bin -o orion-dial-merged.bin @flash_args
+          command: idf.py build && cd build && python -m esptool --chip esp32s3 merge-bin -o orion-dial-merged.bin @flash_args
 
       - name: Upload merged image for the Pages job
         uses: actions/upload-artifact@v4

@@ -201,14 +201,14 @@ static void apply_baseline(void)
     st->away = false;
 
     zone_state_t *a = &st->zones[ZONE_A];
-    snprintf(a->user_name, sizeof(a->user_name), "Chris");
+    snprintf(a->user_name, sizeof(a->user_name), "Alex");
     a->on = true;
     snprintf(a->thermal_state, sizeof(a->thermal_state), "holding");
     a->temp_c = 21.1f;    // -> 70F
     a->actual_c = 21.1f;  // at target
 
     zone_state_t *b = &st->zones[ZONE_B];
-    snprintf(b->user_name, sizeof(b->user_name), "Jamie");
+    snprintf(b->user_name, sizeof(b->user_name), "Sam");
     b->on = true;
     snprintf(b->thermal_state, sizeof(b->thermal_state), "heating");
     b->temp_c = 22.2f;    // -> 72F target

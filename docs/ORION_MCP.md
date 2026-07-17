@@ -114,7 +114,9 @@ should be confirmed with a `DIAL_READ=1 npm run dial:ref` run and tightened in
 
 Keep `DEVICE_CLIENT=fake` (the default) to develop the dial UX against the
 in-memory topper simulator + the virtual dial (the removed hub's
-`simulator/` directory, see git history).
+`simulator/` directory, see git history — not to be confused with the
+current top-level `simulator/`, which renders the firmware's UI for the
+README screenshots).
 
 ## Security notes
 

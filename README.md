@@ -46,6 +46,7 @@ dial's own screen, and future updates arrive over the air.
 <summary><sub>Build from source (developers)</sub></summary>
 
 ```bash
+cd firmware/dial-idf
 idf.py set-target esp32s3
 idf.py build
 idf.py -p <PORT> flash
@@ -127,7 +128,8 @@ cmake -B build -S simulator
 cmake --build build
 ```
 
-Run the resulting binary; PNGs land in `docs/screens/`. See
+Then run `./build/dial_sim` from the repo root; PNGs land in
+`docs/screens/`. See
 [simulator/README.md](simulator/README.md) for details.
 
 ## Repo layout
