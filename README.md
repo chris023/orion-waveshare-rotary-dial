@@ -35,10 +35,10 @@ happens on the device itself after first boot.
 
 **Option 1: Flash from your browser.** Open
 [https://chris023.github.io/orion-waveshare-rotary-dial/](https://chris023.github.io/orion-waveshare-rotary-dial/)
-in Chrome or Edge, plug the dial in over USB-C (no port showing up? flip the
-plug — the board's one USB-C port reaches a different chip in each
-orientation), and click Install. Everything else happens on the dial's
-screen.
+in Chrome or Edge, plug the dial in over USB-C (no port showing up? rotate
+the connector 180° in the dial's own socket — same cable end, just upside
+down; the board reaches a different chip in each orientation), and click
+Install. Everything else happens on the dial's screen.
 
 **Option 2: Build from source.**
 
