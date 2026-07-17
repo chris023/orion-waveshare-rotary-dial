@@ -7,6 +7,15 @@ no hub, no phone app, no server of ours in between. Everything (Wi-Fi
 provisioning, OAuth 2.1 + Dynamic Client Registration, and MCP-over-HTTPS to
 Orion's servers) runs on the dial itself.
 
+## Just want to use the dial?
+
+Flash it from your browser at
+[https://chris023.github.io/orion-waveshare-rotary-dial/](https://chris023.github.io/orion-waveshare-rotary-dial/)
+— no toolchain needed. After that first flash, every future update arrives
+over the air (Menu → About → Software update), so you shouldn't need
+anything below this point again. The rest of this README covers building
+and modifying the firmware yourself.
+
 ## Hardware
 
 - **Board:** Waveshare `ESP32-S3-Knob-Touch-LCD-1.8` — round touch LCD +
@@ -17,14 +26,20 @@ Orion's servers) runs on the dial itself.
   `/dev/cu.usbmodem2101` on macOS, `/dev/ttyUSB0` or `/dev/ttyACM0` on Linux,
   `COM<N>` on Windows. Pass it to `idf.py` with `-p <PORT>`; if you omit `-p`,
   `idf.py` will try to auto-detect it.
+- **No port, or the wrong one?** The dial's single USB-C socket reaches a
+  different chip depending on which way the connector sits — rotate the
+  same connector 180° in the **dial's own socket** (don't swap which end
+  of the cable goes where) to switch. For flashing and monitoring you want
+  the **S3**, which shows up as `usbmodem*` / "USB JTAG/serial debug unit";
+  the other orientation reaches a companion chip that enumerates as
+  `usbserial*` instead.
 
 ## Prerequisites
 
-Just want to run the dial, not build it? Flash prebuilt firmware from your
-browser at
-[https://chris023.github.io/orion-waveshare-rotary-dial/](https://chris023.github.io/orion-waveshare-rotary-dial/)
-— no toolchain needed. The rest of this README is for building or modifying
-the firmware yourself.
+**This section and Build & flash below are the developer path** —
+building or modifying the firmware yourself. If you just want a working
+dial, use the browser flasher above instead; nothing here is required for
+that.
 
 This firmware is pinned to **ESP-IDF v6.0**, target **esp32s3**. Install it
 with Espressif's standard flow (no project-specific scripts needed):
@@ -44,6 +59,9 @@ troubleshooting.
 
 ## Build & flash
 
+With ESP-IDF installed from above, this produces your own build and puts it
+on a dial over USB:
+
 ```bash
 cd firmware/dial-idf
 idf.py set-target esp32s3     # first time only
@@ -62,8 +80,24 @@ fill in your network. `secrets.h` is git-ignored and only pre-seeds NVS the
 first time there are no stored credentials — it changes nothing for anyone
 who doesn't create it.
 
-If you ever need a manual `esptool` invocation instead of `idf.py flash`
-(scripting a production flash, for instance), the offsets come from
+### Advanced/reference: manual esptool flashing
+
+Not needed for normal `idf.py flash` development — this is for scripting a
+production flash or understanding what `idf.py flash` does under the hood.
+
+Each GitHub Release publishes two images: `orion-dial.bin`, the OTA app
+image (what the dial fetches for itself over the air), and
+`orion-dial-merged.bin`, a full-flash image with bootloader + partition
+table + app already combined at their real offsets, meant to be written
+starting at `0x0`. That's the image the browser flasher writes, and you can
+write it yourself the same way with a release download in hand:
+
+```bash
+python -m esptool --chip esp32s3 -p <PORT> -b 921600 write-flash 0x0 orion-dial-merged.bin
+```
+
+If you're building locally and want to reproduce what `idf.py flash` does
+with a manual `esptool` invocation instead, the individual offsets come from
 [`partitions.csv`](partitions.csv) and `build/flash_args` after a build:
 
 ```bash
@@ -76,8 +110,9 @@ python -m esptool --chip esp32s3 -p <PORT> -b 921600 \
   0x20000 build/orion-dial.bin
 ```
 
-Prefer `idf.py -p <PORT> flash` — it derives these offsets itself and is far
-less likely to go stale if the partition table ever changes.
+Prefer `idf.py -p <PORT> flash` for everyday development — it derives these
+offsets itself and is far less likely to go stale if the partition table
+ever changes.
 
 ## First boot
 
@@ -144,8 +179,10 @@ itself:
 - **OTA updates:** however the dial got its first flash — browser or
   USB — everything after that arrives OTA. The dial periodically checks
   this repo's GitHub releases for a newer firmware build (a `dial-vX.Y.Z`
-  tag with an `orion-dial.bin` asset). It only ever *checks* on its own;
-  installing always needs a tap-twice confirm on the About screen's
+  tag with an `orion-dial.bin` asset — releases also carry an
+  `orion-dial-merged.bin` full-flash image, but that's for reflashing from
+  scratch, not for OTA; see Build & flash above). It only ever *checks* on
+  its own; installing always needs a tap-twice confirm on the About screen's
   Software update row. The currently running version is shown there and on
   About's Firmware row.
 
@@ -174,8 +211,12 @@ itself:
   credentials, Orion tokens, and preferences, and restarts the dial as if
   freshly flashed.
 - **Recovering a bricked/misbehaving unit:** if the dial won't boot cleanly
-  or a factory reset from Settings isn't reachable, wipe flash from a
-  computer and reflash from source:
+  or a factory reset from Settings isn't reachable, the easy path is the
+  [browser flasher](https://chris023.github.io/orion-waveshare-rotary-dial/)
+  again — choose the option to erase the device before installing, for a
+  clean slate. No toolchain needed, and it works the same whether or not
+  you built this yourself. The developer equivalent, from a checkout with
+  ESP-IDF set up:
   ```bash
   idf.py -p <PORT> erase-flash flash
   ```
