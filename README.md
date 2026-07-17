@@ -30,17 +30,20 @@ of both zones.
 
 ## Quick start
 
-Everything else — Wi-Fi setup, pairing your Orion account, choosing a side —
-happens on the device itself after first boot.
+### ⚡ Flash from your browser (recommended)
 
-**Option 1: Flash from your browser.** Open
-[https://chris023.github.io/orion-waveshare-rotary-dial/](https://chris023.github.io/orion-waveshare-rotary-dial/)
-in Chrome or Edge, plug the dial in over USB-C (no port showing up? rotate
-the connector 180° in the dial's own socket — same cable end, just upside
-down; the board reaches a different chip in each orientation), and click
-Install. Everything else happens on the dial's screen.
+**Open [chris023.github.io/orion-waveshare-rotary-dial](https://chris023.github.io/orion-waveshare-rotary-dial/)
+in Chrome or Edge, plug the dial in over USB-C, and click Install.**
+That's the whole install — no toolchain, no downloads. Everything else
+(Wi-Fi setup, pairing your Orion account, choosing a side) happens on the
+dial's own screen, and future updates arrive over the air.
 
-**Option 2: Build from source.**
+> No port showing up in the picker? Rotate the connector 180° in the
+> dial's own socket — same cable end, just upside down; the board reaches
+> a different chip in each orientation.
+
+<details>
+<summary><sub>Build from source (developers)</sub></summary>
 
 ```bash
 idf.py set-target esp32s3
@@ -48,9 +51,11 @@ idf.py build
 idf.py -p <PORT> flash
 ```
 
-That needs **ESP-IDF v6.0** installed first. Full build/flash instructions,
+Needs **ESP-IDF v6.0** installed first. Full build/flash instructions,
 board bring-up notes, and firmware architecture live in
 [firmware/dial-idf/README.md](firmware/dial-idf/README.md).
+
+</details>
 
 ## Features
 
