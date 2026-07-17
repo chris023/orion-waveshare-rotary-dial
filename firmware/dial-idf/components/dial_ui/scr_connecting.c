@@ -63,17 +63,24 @@ static void on_state(const app_state_t *st)
         break;
     case PH_OAUTH_DISCOVER:    main_txt = "Linking to Orion..."; break;
     case PH_MCP_CONNECTING:    main_txt = "Connecting to your bed..."; break;
-    case PH_DEGRADED:
+    case PH_DEGRADED: {
         main_txt = "Orion unreachable";
         // Night-quiet errors (design-spec.md's "silent staleness at night"):
         // dim to ink_secondary instead of a bright warning tone at 3am.
         main_color = dial_palette_is_night() ? PAL()->ink_secondary : PAL()->warning;
+        // phase_err carries the specific reason; only echo it in the subtitle
+        // when it adds something the "Orion unreachable" title doesn't already
+        // say (the discover/registration path sets phase_err to that same
+        // string, which used to render twice).
+        bool echo = st->phase_err[0] && strcmp(st->phase_err, main_txt) != 0;
+        const char *why = echo ? st->phase_err : "";
+        const char *nl  = echo ? "\n" : "";
         if (st->retry_in_s > 0)
-            snprintf(sub_txt, sizeof(sub_txt), "%s\nRetrying in %ds",
-                     st->phase_err, st->retry_in_s);
+            snprintf(sub_txt, sizeof(sub_txt), "%s%sRetrying in %ds", why, nl, st->retry_in_s);
         else
-            snprintf(sub_txt, sizeof(sub_txt), "%s\nRetrying...", st->phase_err);
+            snprintf(sub_txt, sizeof(sub_txt), "%s%sRetrying...", why, nl);
         break;
+    }
     default:                   main_txt = "..."; break;
     }
     lv_obj_set_style_text_color(s_label, main_color, 0);

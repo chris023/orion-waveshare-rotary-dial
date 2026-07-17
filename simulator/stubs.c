@@ -110,6 +110,6 @@ void dial_net_on_event(dial_net_event_cb_t cb) { (void)cb; }
 
 const esp_app_desc_t *esp_app_get_description(void)
 {
-    static const esp_app_desc_t desc = { .version = "1.0.5", .idf_ver = "v6.0" };
+    static const esp_app_desc_t desc = { .version = "1.0.6", .idf_ver = "v6.0" };
     return &desc;
 }

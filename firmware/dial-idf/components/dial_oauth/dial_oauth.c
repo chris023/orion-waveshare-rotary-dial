@@ -388,11 +388,11 @@ static esp_err_t cb_handler(httpd_req_t *req)
     bool match = (s_code[0] && strcmp(s_cb_state, s_state) == 0);
     ESP_LOGI(TAG, "callback hit: code=%s state_match=%d", s_code[0] ? "yes" : "no", match);
 
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=UTF-8");
     if (match) {
         s_got_code = true;   // s_code already holds the code
         httpd_resp_sendstr(req,
-            "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
             "<body style='font-family:sans-serif;text-align:center;margin-top:40px'>"
             "<h2 style='color:#0b6'>Dial authorized \xE2\x9C\x93</h2>"
             "<p>You can close this page and return to the dial.</p></body>");

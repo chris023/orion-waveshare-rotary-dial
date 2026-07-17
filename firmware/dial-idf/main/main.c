@@ -77,6 +77,19 @@ static const char *TAG = "app";
 #define BACKOFF_MIN_S  5
 #define BACKOFF_MAX_S 60
 
+// Discovery + anonymous client registration are the steps that must complete
+// before the Orion-link QR can even be built (the authorize URL needs the
+// authorization_endpoint from discovery and the client_id from registration).
+// They're quick public-metadata/registration calls that have nothing to do with
+// the user's account yet. The very first HTTPS request after a fresh Wi-Fi
+// association routinely misses (DNS/ARP/TLS warmup), so retry these fast and
+// quietly — staying on "Linking to Orion..." — for the first several attempts
+// before treating it as a real outage. Without this, a freshly flashed dial fell
+// into the steady-state "Orion unreachable" 5->60s backoff and made the user sit
+// through several retry cycles before the QR appeared.
+#define PREP_FAST_RETRIES 6      // fast attempts before falling to slow backoff
+#define PREP_RETRY_MS  1500      // ~9s total fast-retry window (6 x 1.5s)
+
 static const char *zone_id_str(zone_idx_t z) { return z == ZONE_A ? "zone_a" : "zone_b"; }
 
 /* ---- rotary knob ------------------------------------------------------ */
@@ -1040,6 +1053,8 @@ static void worker_task(void *arg)
     oauth_disc_t disc;
     char client_id[96];
     int backoff_s = BACKOFF_MIN_S;
+    int prep_fast_retries = 0;   // see PREP_FAST_RETRIES: fast, quiet retries for
+                                 // the pre-QR discovery + registration steps
 
     /*
      * Input comes up FIRST, before the network.
@@ -1084,11 +1099,20 @@ static void worker_task(void *arg)
 
         if (!dial_oauth_discover(&disc) ||
             !dial_oauth_ensure_client(&disc, redirect_uri, client_id, sizeof(client_id))) {
+            // Keep the reassuring "Linking to Orion..." (PH_OAUTH_DISCOVER, set at
+            // the top of the loop) and retry quickly for the first few misses —
+            // the warmup window after a fresh association — only then falling into
+            // the slow, user-visible "Orion unreachable" backoff. See PREP_FAST_RETRIES.
+            if (++prep_fast_retries <= PREP_FAST_RETRIES) {
+                vTaskDelay(pdMS_TO_TICKS(PREP_RETRY_MS));
+                continue;
+            }
             dial_state_set_phase(PH_DEGRADED, "Orion unreachable");
             backoff_wait(backoff_s);
             backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
             continue;
         }
+        prep_fast_retries = 0;   // prep steps went through; re-arm fast retry for any later pass
 
         if (!dial_oauth_have_valid_access() && !dial_oauth_refresh(&disc, client_id)) {
             // Interactive consent: QR on screen; on timeout, a fresh QR — no dead end.
