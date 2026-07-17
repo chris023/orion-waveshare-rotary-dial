@@ -33,6 +33,7 @@ typedef enum {
     SCR_SETTINGS,         // settings list (M4, arg: unused/NULL — returns to SCR_MENU)
     SCR_WIFI,             // Wi-Fi status + change-network (arg: unused/NULL)
     SCR_ABOUT,            // versions, serial, software update (arg: unused/NULL)
+    SCR_UPDATING,         // full-screen OTA install takeover (M6, arg: unused/NULL)
     SCR_COUNT,
 } screen_id_t;
 

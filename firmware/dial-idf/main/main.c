@@ -133,6 +133,25 @@ static void knob_init(void)
 
 static screen_id_t nav_policy(const app_state_t *st, void **arg)
 {
+    // OTA install takeover (M6 UX hardening): once the confirmed install on
+    // SCR_ABOUT actually starts pulling bytes, lock the user onto a
+    // dedicated full-screen progress ring until the device reboots (success
+    // — dial_ota_download_and_apply()'s esp_restart() never returns, so this
+    // never even gets a chance to route away) or the install fails. Checked
+    // ahead of everything else, the same forced-navigation trick the welcome
+    // splash below uses, so a routine poll or phase blip can never surface a
+    // normal screen mid-download. READY_REBOOT (image written + verified,
+    // about to restart) stays on the same screen — it's the tail of this
+    // same flow, not a new one.
+    if (st->ota.status == OTA_DOWNLOADING || st->ota.status == OTA_READY_REBOOT)
+        return SCR_UPDATING;
+    // Status moved off the takeover's two states while we were still showing
+    // it — only OTA_FAILED does this in practice (the stale-tap guard on
+    // CMD_OTA_APPLY keeps a race from reaching here any other way). Back to
+    // About, where the stacked error line under the row says why.
+    if (ui_router_current() == SCR_UPDATING)
+        return SCR_ABOUT;
+
     // Onboarding (M4): a genuinely fresh device (no Wi-Fi creds at boot; see
     // app_main) parks on the welcome splash through the earliest connection
     // phases until the user acknowledges it (tap/knob -> dial_state_set_

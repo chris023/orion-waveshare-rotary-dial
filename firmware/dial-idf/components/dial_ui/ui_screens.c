@@ -20,4 +20,5 @@ void ui_screens_register_all(void)
     ui_router_register(SCR_SETTINGS, &scr_settings);
     ui_router_register(SCR_WIFI, &scr_wifi);
     ui_router_register(SCR_ABOUT, &scr_about);
+    ui_router_register(SCR_UPDATING, &scr_updating);
 }

@@ -382,6 +382,23 @@ static void scenario_about(void)
     snapshot("about");
 }
 
+// Full-screen OTA install takeover (M6 UX hardening) — nav_policy forces this
+// in the real firmware the moment ota.status becomes OTA_DOWNLOADING, but the
+// simulator doesn't run a nav policy at all (every scenario navigates
+// directly), so this just sets the status/progress a real download-in-
+// -progress commit would carry and goes straight there. ~62% so the ring
+// reads as mid-download, not just-started or about-to-finish.
+static void scenario_updating(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->ota.status = 3;   // OTA_DOWNLOADING (dial_ota.h's dial_ota_status_t)
+    st->ota.progress_pct = 62;
+    ui_router_go(SCR_UPDATING, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("updating");
+}
+
 static void scenario_standby(void)
 {
     apply_baseline();
@@ -434,8 +451,9 @@ int main(void)
     scenario_settings();
     scenario_wifi_info();
     scenario_about();
+    scenario_updating();
     scenario_standby();
 
-    printf("done: 16 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
+    printf("done: 17 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
     return 0;
 }

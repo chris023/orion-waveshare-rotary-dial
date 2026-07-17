@@ -23,6 +23,7 @@ extern const ui_screen_t scr_sidepick;
 extern const ui_screen_t scr_settings;
 extern const ui_screen_t scr_wifi;
 extern const ui_screen_t scr_about;
+extern const ui_screen_t scr_updating;
 
 /*
  * Shared state->visual classification (design-spec.md §2's grammar table).

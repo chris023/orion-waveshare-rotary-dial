@@ -28,6 +28,22 @@ static bool      s_ota_armed;
 static uint32_t  s_armed_at_ms;
 static lv_timer_t *s_confirm_timer;
 
+// Set the instant the confirming (second) tap fires CMD_OTA_APPLY, cleared
+// once app_state's ota.status actually leaves OTA_AVAILABLE. The worker is
+// single-threaded and this command is just posted to its queue, not run in
+// line — if it's mid an unrelated blocking call (a device-state poll, say)
+// the command can sit queued for a couple of seconds. An UNRELATED state
+// commit landing in that gap (that poll finishing, a night-mode flip, ...)
+// bumps the generation and triggers a routine re-render; without this latch
+// render_ota_row would redraw straight from the still-stale AVAILABLE status
+// and show "vX available - tap to install" again — indistinguishable from
+// the user's confirm never having registered. They'd tap it again, arming
+// and confirming a SECOND time, which is exactly the "had to tap-twice
+// confirm TWICE" report this fixes: not two separate confirms (CHECK never
+// needed one — see row_ota_cb's default case), but this one confirm getting
+// visually undone before the worker caught up to it.
+static bool      s_ota_apply_sent;
+
 /* ---- row factory (scr_settings.c's, ported verbatim) --------------------*/
 
 static lv_obj_t *make_row(lv_obj_t *parent, const char *label_txt, lv_event_cb_t cb, lv_obj_t **value_out)
@@ -117,8 +133,15 @@ static void row_ota_cb(lv_event_t *e)
     case OTA_DOWNLOADING:
         return;
     case OTA_AVAILABLE: {
+        // Already confirmed once; the worker just hasn't drained CMD_OTA_APPLY
+        // yet (render_ota_row is holding the optimistic text over this same
+        // gap — see s_ota_apply_sent's comment). Ignore the extra tap rather
+        // than arming a pointless second confirm.
+        if (s_ota_apply_sent) return;
         if (!confirm_tap()) return;
         dial_haptics_play(HAPTIC_CONFIRM);
+        s_ota_apply_sent = true;
+        if (s_val_ota) lv_label_set_text(s_val_ota, "Starting install...");
         app_cmd_t cmd = { .kind = CMD_OTA_APPLY };
         dial_cmd_post(&cmd);
         return;
@@ -159,6 +182,15 @@ static void apply_palette(lv_obj_t *scr)
 static void render_ota_row(const app_state_t *st)
 {
     if (!s_val_ota || s_ota_armed) return;
+
+    // Hold "Starting install..." up until the status actually moves off
+    // AVAILABLE (see s_ota_apply_sent's comment) — an unrelated commit
+    // landing before the worker drains CMD_OTA_APPLY must not repaint the
+    // AVAILABLE prompt the user just confirmed away.
+    if (s_ota_apply_sent) {
+        if (st->ota.status == OTA_AVAILABLE) return;
+        s_ota_apply_sent = false;
+    }
 
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_text_color(s_val_ota, pal->ink_secondary, 0);
@@ -204,6 +236,7 @@ static void create(lv_obj_t *scr, void *arg)
 {
     (void)arg;
     s_ota_armed = false;
+    s_ota_apply_sent = false;
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
@@ -266,6 +299,7 @@ static void destroy(void)
     s_ota_err_lbl = NULL;
     s_val_serial = NULL;
     s_ota_armed = false;
+    s_ota_apply_sent = false;
 }
 
 static void on_state(const app_state_t *st)
