@@ -68,7 +68,9 @@ board bring-up notes, and firmware architecture live in
   firmware.
 - **Dual-zone control** with a side picker, so one dial can drive either
   half of the bed.
-- **°F or °C**, your choice, in settings.
+- **Absolute or relative temperature** — read the setpoint as a real
+  temperature (**°F or °C**, your choice) or as an Orion-style **−10…+10
+  level**, switchable in settings. Fresh dials default to relative.
 - **Haptic detents** on every knob turn, with a distinct stop pulse at the
   ends of a range.
 - **Day/night palette** that shifts with the clock, and a **standby clock

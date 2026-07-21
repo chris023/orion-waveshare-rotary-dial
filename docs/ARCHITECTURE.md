@@ -91,11 +91,41 @@ single feature's bug can't corrupt unrelated state:
 |---|---|---|
 | `wifi` | `dial_net` | SSID/password |
 | `oauth` | `dial_oauth` | Registered client id, tokens, PKCE verifier |
-| `ui` | `dial_state` | Side (zone), °F/°C, haptics on/off, screen rotation |
+| `ui` | `dial_state` | Side (zone), °F/°C, temperature scale (`relmode`), haptics on/off, screen rotation |
 | `time` | `dial_time` | Resolved POSIX TZ string |
 
 Factory reset clears these namespaces and reboots into `PH_WIFI_PORTAL` as a
 fresh device.
+
+## Temperature scale
+
+The setpoint is carried internally as whole **°F** everywhere (`ui_temp_f`,
+`CMD_SET_TEMP.temp_f`); Orion's wire is always **°C**, converted only at the
+`set_zone` boundary in the worker. Two display scales sit over that carrier:
+
+- **Absolute** — °F (or °C for display when the Units pref is set). Arc range
+  55–110 °F, one detent = 1 °F. Unchanged from earlier releases.
+- **Relative** — Orion's own **−10…+10 level** scale (its third
+  `temperature_scale` table). Arc range widens to the device's full 50–113 °F
+  so all 21 levels are reachable; one detent = one level. The 21 carrier °F and
+  their nearest-level boundaries are compiled constants in `dial_state.h`
+  (`DIAL_REL_F` / `DIAL_REL_LO_F`), each chosen so its °C lands strictly inside
+  that level's bracket — a device poll can therefore never move the displayed
+  level. `orion_discover_device` re-validates them against the live
+  `temperature_scale.relative` on every link-up and logs loudly on any drift.
+
+The scale is a per-device preference (`ui`/`relmode`): fresh dials default to
+relative, dials upgrading from ≤v1.0.6 stay absolute (the big number must not
+change meaning under an unattended OTA). Two invariants govern the dial face:
+
+1. **Snap on intent, never on observation.** The setpoint is written only from
+   a real input event (knob detent, arc release); rendering derives a level
+   from the device value and displays it, but never writes back — so the number
+   and the bed always move together, or not at all.
+2. **Setpoints render in the active scale; measurements render in absolute.**
+   The hero numeral and the Tonight schedule are setpoints (levels in relative
+   mode). The measured **water** temperature is a continuum reading and stays a
+   real degree (°F/°C) in every mode, keeping an absolute reference on screen.
 
 ## Orion MCP call surface
 

@@ -29,6 +29,13 @@ void dial_state_init(void)
     s_state.phase = PH_BOOT;
     s_state.wifi_join_idx = -1;   // no on-device join attempted yet
     s_state.haptics_enabled = true;   // matches dial_haptics.c's own default
+    // Fresh-device default: relative scale (owner decision). Seeded here, in
+    // RAM, exactly like haptics_enabled above — restore_prefs opens NVS
+    // read-only and early-returns when the "ui" namespace doesn't exist yet
+    // (a factory-fresh device), so a default that lived only there would never
+    // apply. An upgrading device overrides this back to absolute in
+    // restore_prefs when it finds a pre-existing "zone" key but no "relmode".
+    s_state.rel_mode = true;
     for (int z = 0; z < ZONE_COUNT; z++) {
         s_state.ui_temp_f[z]       = -1;
         s_state.zones[z].actual_c  = -1.0f;
@@ -39,13 +46,14 @@ void dial_state_restore_prefs(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
-    uint8_t zone = 0, units = 0, haptics = 1, rot = 0;
+    uint8_t zone = 0, units = 0, haptics = 1, rot = 0, relmode = 1;
     bool have_zone    = nvs_get_u8(h, "zone", &zone) == ESP_OK && zone < ZONE_COUNT;
     bool have_units   = nvs_get_u8(h, "units", &units) == ESP_OK;
     bool have_haptics = nvs_get_u8(h, "haptics", &haptics) == ESP_OK;
     bool have_rot     = nvs_get_u8(h, "rot", &rot) == ESP_OK && rot < 4;
+    bool have_rel     = nvs_get_u8(h, "relmode", &relmode) == ESP_OK;
     nvs_close(h);
-    if (!have_zone && !have_units && !have_haptics && !have_rot) return;
+    if (!have_zone && !have_units && !have_haptics && !have_rot && !have_rel) return;
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
     if (have_zone) {
@@ -58,6 +66,13 @@ void dial_state_restore_prefs(void)
     if (have_units)   s_state.units_c        = (units != 0);
     if (have_haptics) s_state.haptics_enabled = (haptics != 0);
     if (have_rot)     s_state.rotation        = rot;
+    // Temperature scale. If we've ever persisted it, honor it. Otherwise, if
+    // this device was set up before this release (has a "zone" key but no
+    // "relmode"), keep it on ABSOLUTE — an unattended OTA must not change what
+    // the big number means for a user who's read °F every night. A truly fresh
+    // device has neither key and keeps init's relative default.
+    if (have_rel)       s_state.rel_mode = (relmode != 0);
+    else if (have_zone) s_state.rel_mode = false;
     s_state.generation++;
     xSemaphoreGive(s_mux);
 }
@@ -188,8 +203,27 @@ void dial_state_set_side_picked(void)
 {
     xSemaphoreTake(s_mux, portMAX_DELAY);
     s_state.side_picked = true;
+    bool rel = s_state.rel_mode;
     s_state.generation++;
     xSemaphoreGive(s_mux);
+
+    // Onboarding runs only on a fresh device (nav_policy gates SCR_SIDEPICK on
+    // !side_picked, and an upgrade restores side_picked from the existing
+    // "zone" key so it never reaches here). Persisting "relmode" now is what
+    // lets a fresh device's relative default survive a reboot even if the user
+    // never opens Settings — otherwise its second boot would see a "zone" key
+    // (written by the side pick) but no "relmode" and wrongly apply the
+    // upgrade→absolute rule in dial_state_restore_prefs. On an upgrade this
+    // code is unreachable, so a genuine ≤v1.0.6 device still lands on absolute.
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        uint8_t existing;
+        if (nvs_get_u8(h, "relmode", &existing) != ESP_OK) {
+            nvs_set_u8(h, "relmode", rel ? 1 : 0);
+            nvs_commit(h);
+        }
+        nvs_close(h);
+    }
 }
 
 void dial_state_set_units_c(bool units_c)
@@ -204,6 +238,25 @@ void dial_state_set_units_c(bool units_c)
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
         nvs_set_u8(h, "units", units_c ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+void dial_state_set_rel_mode(bool rel_mode)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.rel_mode = rel_mode;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    // Rare Settings tap in the LVGL task — a ~ms NVS write here is fine (same
+    // reasoning as dial_state_set_units_c above). This is also what pins an
+    // upgraded device's scale once the user has opted in, so restore_prefs
+    // honors it over the upgrade→absolute default from then on.
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "relmode", rel_mode ? 1 : 0);
         nvs_commit(h);
         nvs_close(h);
     }

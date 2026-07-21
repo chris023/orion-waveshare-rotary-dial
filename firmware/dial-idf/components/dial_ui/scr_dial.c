@@ -22,6 +22,8 @@ LV_FONT_DECLARE(dial_font_num_88)
 
 static lv_obj_t *s_arc;
 static lv_obj_t *s_stale_dot;
+static lv_obj_t *s_zero_notch;   // neutral (level 0) landmark, relative mode only
+static lv_obj_t *s_handle;       // setpoint drag handle — the ONLY temp touch target
 
 /*
  * Water level, drawn as a VALUE STEP rather than a texture: no stripes, no
@@ -72,8 +74,32 @@ static int s_shown_f = -1;
 // Display-units cache (design-spec.md's units toggle, M4): updated from
 // apply_palette_and_state on every on_state, read by render_numeral — which
 // is also called mid-drag/mid-detent, where only the raw °F value is at
-// hand. The store, arc range, and knob detent size all stay °F regardless.
+// hand. The store keeps the setpoint in °F regardless.
 static bool s_units_c;
+
+// Relative-scale cache (owner: togglable absolute/relative setpoint scale),
+// same lifecycle as s_units_c: set from apply_palette_and_state, read by
+// render_numeral and on_knob (both run without a fresh snapshot). The internal
+// setpoint stays whole °F; relative is a −10…+10 level view over it.
+static bool s_rel;
+
+// Relief-active cache for the knob guard: a detent during a boost is inert
+// (owner decision) so a stray turn can't silently rewrite the setpoint by up
+// to 2.5°C while the pill still counts down. Set from apply_palette_and_state.
+static bool s_relief_active;
+
+// Current configured arc range (°F). Absolute mode keeps the shipped 55–110;
+// relative mode widens to 50–113 so all 21 levels are reachable (owner: widen
+// only in relative mode, so an existing °F user's arc never moves). -1 forces
+// configure_arc_range() to set it on the first render after each create().
+static int s_arc_min = -1, s_arc_max = -1;
+
+// Setpoint drag handle state. s_dragging is true between the handle's PRESSED
+// and RELEASED so on_gesture/on_state never fight an in-progress drag; s_press_f
+// is the setpoint at press start, so a tap on the handle (no movement) commits
+// nothing.
+static bool s_dragging;
+static int  s_press_f;
 
 // Chevron pulse (design-spec.md §6): only running while heating/cooling, and
 // only restarted when that changes or the day/night duration changes.
@@ -170,13 +196,68 @@ static void chevron_stop(void)
 
 // Temperature -> degrees into the arc's own 0..270 sweep (rotation adds 135).
 // Same mapping the setpoint indicator uses, so the level and the fill land on
-// one scale.
+// one scale. Uses the CURRENT arc range so the water overlay stays aligned with
+// the (mode-dependent) indicator — 55–110 in absolute, 50–113 in relative.
 static uint16_t level_angle(float f)
 {
-    if (f < DIAL_TEMP_MIN_F) f = DIAL_TEMP_MIN_F;
-    if (f > DIAL_TEMP_MAX_F) f = DIAL_TEMP_MAX_F;
-    float d = 270.0f * (f - DIAL_TEMP_MIN_F) / (float)(DIAL_TEMP_MAX_F - DIAL_TEMP_MIN_F);
+    if (f < s_arc_min) f = s_arc_min;
+    if (f > s_arc_max) f = s_arc_max;
+    float d = 270.0f * (f - s_arc_min) / (float)(s_arc_max - s_arc_min);
     return (uint16_t)lroundf(d);
+}
+
+// Point the arc (and thus level_angle) at the range the current scale needs.
+// Cheap and idempotent — only touches the widget when the range actually
+// changes (a mode toggle), so it never disturbs an in-progress drag.
+static void configure_arc_range(void)
+{
+    int mn = s_rel ? DIAL_REL_MIN_F : DIAL_TEMP_MIN_F;
+    int mx = s_rel ? DIAL_REL_MAX_F : DIAL_TEMP_MAX_F;
+    if (mn != s_arc_min || mx != s_arc_max) {
+        lv_arc_set_range(s_arc, mn, mx);
+        s_arc_min = mn;
+        s_arc_max = mx;
+    }
+}
+
+/* ---- setpoint handle geometry ------------------------------------------ */
+// The arc sweeps 270° starting at 135° (lower-left), clockwise over the top to
+// 45° (lower-right); the remaining 90° at the bottom is the gap. Both helpers
+// share that mapping so the handle rides exactly on the fill's leading edge.
+
+// Place the handle centered ON the arc band (not on its outer edge). LVGL draws
+// its own knob at the band centerline = (inner span)/2 − indic_width/2; we mirror
+// that exactly, read from the live object, so the handle sits dead-center on the
+// ring regardless of the arc's padding.
+static void position_handle(int f)
+{
+    if (!s_handle || s_arc_max <= s_arc_min) return;
+    lv_coord_t span = LV_MIN(lv_obj_get_width(s_arc), lv_obj_get_height(s_arc))
+                      - lv_obj_get_style_pad_left(s_arc, LV_PART_MAIN)
+                      - lv_obj_get_style_pad_right(s_arc, LV_PART_MAIN);
+    float r = (span > 0 ? span : 2 * ARC_R) / 2.0f
+              - lv_obj_get_style_arc_width(s_arc, LV_PART_INDICATOR) / 2.0f;
+    float frac = (float)(f - s_arc_min) / (float)(s_arc_max - s_arc_min);
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    float ang = (135.0f + frac * 270.0f) * (float)M_PI / 180.0f;
+    int dx = (int)lroundf(r * cosf(ang));
+    int dy = (int)lroundf(r * sinf(ang));
+    lv_obj_align(s_handle, LV_ALIGN_CENTER, dx, dy);
+}
+
+// Map a live touch point (screen coords) back to a setpoint °F along the sweep.
+// Angles in the bottom gap fold to whichever rail is nearer, so a finger that
+// slides off the bottom pins cleanly instead of jumping across the gap.
+static int value_from_point(lv_point_t p)
+{
+    float theta = atan2f((float)(p.y - CY), (float)(p.x - CX)) * 180.0f / (float)M_PI;
+    if (theta < 0.0f) theta += 360.0f;              // 0..360, 0 at 3 o'clock, +cw
+    float sweep = theta - 135.0f;                   // 0 at the arc's start
+    if (sweep < 0.0f) sweep += 360.0f;
+    if (sweep > 270.0f) sweep = (sweep > 315.0f) ? 0.0f : 270.0f;   // gap -> nearer rail
+    float frac = sweep / 270.0f;
+    return s_arc_min + (int)lroundf(frac * (float)(s_arc_max - s_arc_min));
 }
 
 static void level_render(int target_f)
@@ -232,6 +313,8 @@ static void apply_palette_and_state(const app_state_t *st)
     const dial_palette_t *pal = PAL();
     bool night = dial_palette_is_night();
     s_units_c = st->units_c;
+    s_rel     = st->rel_mode;
+    configure_arc_range();       // point the arc at this scale's rails
     const zone_state_t *z = &st->zones[s_zone];
     zone_kind_t kind = dial_zone_kind(z, st->device_online);
     lv_color_t accent = dial_zone_accent(kind, pal);
@@ -241,6 +324,7 @@ static void apply_palette_and_state(const app_state_t *st)
     // kind/opacity the ordinary state grammar would otherwise pick — the
     // power disc below stays kind-based (boost doesn't change on/off meaning).
     bool relief = z->relief_active;
+    s_relief_active = relief;    // knob guard reads this without a fresh snapshot
     lv_color_t relief_accent = z->relief_heat ? pal->accent_heat : pal->accent_cool;
     lv_color_t arc_accent = relief ? relief_accent : accent;
 
@@ -283,7 +367,24 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_text_color(s_temp_lbl, pal->ink_primary, 0);
     lv_obj_set_style_text_opa(s_temp_lbl, (kind == ZK_OFFLINE) ? 115 : LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(s_unit_lbl, pal->ink_secondary, 0);
-    lv_label_set_text(s_unit_lbl, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
+    // Relative mode has no unit — the suffix names the quantity instead (mirrors
+    // scr_boost's "MIN"). The measured-water caption above keeps its degree, so
+    // an absolute reference stays on the face in every mode.
+    if (st->rel_mode) lv_label_set_text(s_unit_lbl, "LEVEL");
+    else              lv_label_set_text(s_unit_lbl, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
+
+    // Neutral landmark: a tick at 12 o'clock (level 0's center) shown only in
+    // relative mode — it turns the ring from a plain bar into a bipolar
+    // instrument. Geometrically free: the arc's midpoint already sits at top.
+    lv_obj_set_style_bg_color(s_zero_notch, pal->ink_secondary, 0);
+    if (s_rel) lv_obj_clear_flag(s_zero_notch, LV_OBJ_FLAG_HIDDEN);
+    else       lv_obj_add_flag(s_zero_notch, LV_OBJ_FLAG_HIDDEN);
+
+    // Setpoint handle: themed to the live accent and parked at the setpoint.
+    // Left alone while the user is dragging it — they own s_shown_f then, and a
+    // reposition from a stray commit would fight the finger.
+    lv_obj_set_style_bg_color(s_handle, arc_accent, 0);
+    if (!s_dragging) position_handle(s_shown_f);
 
     // State pill: surface fill, state-accent border/text/glyph. While relief
     // is active it takes over the pill entirely (glyph + countdown word),
@@ -371,14 +472,22 @@ static void apply_palette_and_state(const app_state_t *st)
     else          lv_obj_add_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
 }
 
-// Display-only °C conversion when s_units_c (M4): one decimal, dial_f_to_c's
-// natural granularity. The value passed in is always °F — the internal
-// representation, arc range, and knob detent never change.
+// The value passed in is always °F — the internal representation. Relative mode
+// shows the nearest −10…+10 level ("+3" / "0" / "-3"); the '+' is the glyph
+// spliced into dial_font_num_88 (level 0 is a bare "0", no sign). Absolute mode
+// keeps °F, or a one-decimal °C conversion when s_units_c (M4).
 static void render_numeral(int temp_f)
 {
     char t[8];
-    if (s_units_c) snprintf(t, sizeof(t), "%.1f", dial_f_to_c(temp_f));
-    else           snprintf(t, sizeof(t), "%d", temp_f);
+    if (s_rel) {
+        int lvl = dial_rel_from_f(temp_f);
+        if (lvl == 0) snprintf(t, sizeof(t), "0");
+        else          snprintf(t, sizeof(t), "%+d", lvl);   // "+3" / "-3"
+    } else if (s_units_c) {
+        snprintf(t, sizeof(t), "%.1f", dial_f_to_c(temp_f));
+    } else {
+        snprintf(t, sizeof(t), "%d", temp_f);
+    }
     lv_label_set_text(s_temp_lbl, t);
 }
 
@@ -392,25 +501,61 @@ static void post_temp_for(zone_idx_t zone, int temp_f)
 
 static void post_temp(int temp_f) { post_temp_for(s_zone, temp_f); }
 
-// LVGL event callbacks already hold the LVGL mutex — no locking here.
-// The zone rides in user_data, bound at create(): a release event delivered
-// after a swipe already flipped s_zone must command the zone the widget was
-// built for, not whichever side the screen shows now.
-static void arc_event_cb(lv_event_t *e)
+// Setpoint handle drag. The handle is the ONLY temperature touch target: the
+// arc itself is display-only (non-clickable), so a press on the ring away from
+// the handle — or anywhere in the centre — falls through to the screen and can
+// become a page swipe. The handle does NOT bubble gestures, so a flick that
+// begins on it adjusts temperature and never navigates. Between the two,
+// swiping and temperature-setting are mutually exclusive by where the touch
+// starts, which is exactly the behaviour the ring's whole-widget drag broke.
+//
+// LVGL keeps the press bound to the handle for the whole drag even as the finger
+// travels off it around the ring, so PRESSING gives us the live point to map.
+// The zone rides in user_data, bound at create() (see the note on power_event_cb).
+static void handle_event_cb(lv_event_t *e)
 {
-    dial_state_stamp_input();
-    lv_obj_t *arc = lv_event_get_target(e);
-    int f = lv_arc_get_value(arc);
-    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
-        // Live feedback while dragging. The stripes move too: dragging the
-        // target past the water level flips heating<->cooling, which changes
-        // both where they start and what color they are.
-        s_shown_f = f;
-        if (s_temp_lbl) render_numeral(f);
-        level_render(f);
-    } else {                                          // LV_EVENT_RELEASED
-        post_temp_for((zone_idx_t)(uintptr_t)lv_event_get_user_data(e), f);
+    lv_event_code_t code = lv_event_get_code(e);
+    zone_idx_t zone = (zone_idx_t)(uintptr_t)lv_event_get_user_data(e);
+
+    if (code == LV_EVENT_PRESSED) {
+        if (s_relief_active) return;      // handle is inert during a boost, like the knob
+        s_dragging = true;
+        s_press_f = s_shown_f;
+        dial_state_stamp_input();
+        return;
     }
+    if (!s_dragging) return;              // a press that didn't start a drag (relief)
+
+    if (code == LV_EVENT_PRESSING) {
+        lv_indev_t *indev = lv_indev_get_act();
+        if (!indev) return;
+        lv_point_t p;
+        lv_indev_get_point(indev, &p);
+        int f = value_from_point(p);
+        // Live feedback: the fill, numeral (nearest level in relative), water
+        // step and handle all follow the finger; nothing is committed until
+        // release (matches the old arc-drag behaviour).
+        s_shown_f = f;
+        lv_arc_set_value(s_arc, f);
+        render_numeral(f);
+        level_render(f);
+        position_handle(f);
+        dial_state_stamp_input();
+        return;
+    }
+
+    // LV_EVENT_RELEASED / LV_EVENT_PRESS_LOST — end of the drag.
+    s_dragging = false;
+    int f = s_shown_f;
+    if (s_rel) {                          // commit exactly on Orion's level grid
+        f = dial_rel_to_f(dial_rel_from_f(f));
+        s_shown_f = f;
+        lv_arc_set_value(s_arc, f);
+        render_numeral(f);
+        level_render(f);
+        position_handle(f);
+    }
+    if (f != s_press_f) post_temp_for(zone, f);   // a tap that didn't move commits nothing
 }
 
 static void power_event_cb(lv_event_t *e)
@@ -465,6 +610,10 @@ static void create(lv_obj_t *scr, void *arg)
     s_chevron_active = false;
     s_stale_shown = false;
     s_units_c = false;   // on_state (called right after create) sets the real value
+    s_rel = false;
+    s_relief_active = false;
+    s_dragging = false;
+    s_arc_min = s_arc_max = -1;   // force configure_arc_range() on this arc
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
     lv_obj_add_event_cb(scr, screen_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
@@ -480,9 +629,14 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_arc_width(s_arc, 16, LV_PART_MAIN);
     lv_obj_set_style_arc_width(s_arc, 16, LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(s_arc, true, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(s_arc, LV_OPA_TRANSP, LV_PART_KNOB);   // draggable, invisible
-    lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_VALUE_CHANGED, (void *)(uintptr_t)s_zone);
-    lv_obj_add_event_cb(s_arc, arc_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)s_zone);
+    lv_obj_set_style_bg_opa(s_arc, LV_OPA_TRANSP, LV_PART_KNOB);   // no built-in knob dot
+    // The arc is DISPLAY-ONLY. An lv_arc grabs its whole bounding box (or, with
+    // ADV_HITTEST, the entire ring) and turns any drag across it into a value
+    // change — which is why a page-to-page swipe was also moving the setpoint.
+    // Clearing CLICKABLE lets presses on the ring (and the centre) fall through
+    // to the screen so they can be swipes/long-presses; the discrete handle
+    // below is the only thing that sets temperature.
+    lv_obj_clear_flag(s_arc, LV_OBJ_FLAG_CLICKABLE);
 
     // #4 Water level: a value-step overlay sharing the arc's exact geometry,
     // created after it so it lands on top of the fill. Rounded caps to match
@@ -500,6 +654,41 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_remove_style(s_level, NULL, LV_PART_KNOB);
     lv_obj_clear_flag(s_level, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);   // until the first measurement
+
+    // Neutral (level 0) landmark — a short tick at 12 o'clock over the arc
+    // band, created after the arc so it sits above the fill. Shown only in
+    // relative mode (apply_palette_and_state); the arc's own midpoint is
+    // already at top, so this marks the center of the bipolar scale.
+    s_zero_notch = lv_obj_create(scr);
+    lv_obj_set_size(s_zero_notch, 3, 16);
+    lv_obj_set_style_radius(s_zero_notch, 0, 0);
+    lv_obj_set_style_border_width(s_zero_notch, 0, 0);
+    lv_obj_set_style_bg_opa(s_zero_notch, LV_OPA_60, 0);
+    lv_obj_clear_flag(s_zero_notch, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_zero_notch, LV_ALIGN_CENTER, 0, -ARC_R);
+    lv_obj_add_flag(s_zero_notch, LV_OBJ_FLAG_HIDDEN);
+
+    // #3b Setpoint handle — the sole touch target for temperature. A thumb on
+    // the ring at the current setpoint (created after the arc/fill so it sits on
+    // top, at the fill's leading edge): press and drag it around the ring to set
+    // the temperature. Its ext_click_area gives a generous ~56px grab without a
+    // bulky visual. Deliberately NOT EVENT_BUBBLE-ing (the lv_obj default), so a
+    // gesture that starts on it dies here instead of navigating — that, plus the
+    // now display-only arc, is what makes swipe and temperature-set mutually
+    // exclusive. Positioned/colored per render in apply_palette_and_state.
+    s_handle = lv_obj_create(scr);
+    lv_obj_set_size(s_handle, 28, 28);
+    lv_obj_set_style_radius(s_handle, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_handle, 3, 0);
+    lv_obj_set_style_border_color(s_handle, pal->bg, 0);   // bg ring -> reads as a thumb ON the track
+    lv_obj_clear_flag(s_handle, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_handle, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(s_handle, 14);   // ~56px effective touch target
+    lv_obj_align(s_handle, LV_ALIGN_CENTER, 0, -ARC_R);
+    lv_obj_add_event_cb(s_handle, handle_event_cb, LV_EVENT_PRESSED,    (void *)(uintptr_t)s_zone);
+    lv_obj_add_event_cb(s_handle, handle_event_cb, LV_EVENT_PRESSING,   (void *)(uintptr_t)s_zone);
+    lv_obj_add_event_cb(s_handle, handle_event_cb, LV_EVENT_RELEASED,   (void *)(uintptr_t)s_zone);
+    lv_obj_add_event_cb(s_handle, handle_event_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t)s_zone);
 
     // #5 Side name.
     s_name_lbl = lv_label_create(scr);
@@ -649,6 +838,9 @@ static void destroy(void)
     s_actual_f = -1.0f;
 
     s_level = NULL;
+    s_zero_notch = NULL;
+    s_handle = NULL;
+    s_dragging = false;
     s_arc = s_stale_dot = s_name_lbl = NULL;
     s_underline_solid = s_underline_dash = s_water_lbl = NULL;
     s_num_box = s_temp_lbl = s_unit_lbl = NULL;
@@ -679,15 +871,22 @@ static void on_state(const app_state_t *st)
     // Optimistic intent wins while set; otherwise follow the device. Resolved
     // BEFORE apply_palette_and_state, which lays the water stripes out against
     // s_shown_f — reading a stale target there would leave them a poll behind.
-    int f = (st->ui_temp_f[s_zone] >= 0) ? st->ui_temp_f[s_zone] : dial_c_to_f(z->temp_c);
-    s_shown_f = f;
+    // Skipped entirely while the handle is being dragged: the finger owns
+    // s_shown_f then, and a commit landing mid-drag must not yank it away.
+    if (!s_dragging) {
+        int f = (st->ui_temp_f[s_zone] >= 0) ? st->ui_temp_f[s_zone] : dial_c_to_f(z->temp_c);
+        s_shown_f = f;
+    }
 
     // Sets s_units_c (among other things) before render_numeral below reads it
-    // — otherwise a units toggle would render one call stale.
+    // — otherwise a units toggle would render one call stale. (Also repositions
+    // the handle, unless a drag is in progress.)
     apply_palette_and_state(st);
 
-    lv_arc_set_value(s_arc, f);
-    render_numeral(f);
+    if (!s_dragging) {
+        lv_arc_set_value(s_arc, s_shown_f);
+        render_numeral(s_shown_f);
+    }
 
     if (z->user_name[0]) {
         char name[36];
@@ -710,10 +909,29 @@ static void on_state(const app_state_t *st)
 static bool on_knob(int detents)
 {
     if (!s_arc || s_shown_f < 0) return false;
-    int nf = s_shown_f + detents;
-    if (nf < DIAL_TEMP_MIN_F) nf = DIAL_TEMP_MIN_F;
-    if (nf > DIAL_TEMP_MAX_F) nf = DIAL_TEMP_MAX_F;
-    if (nf == s_shown_f) {                          // at the range stop
+
+    // A boost is a modal thing you started deliberately (owner decision): while
+    // relief is active the knob is inert, so a stray detent can't rewrite the
+    // setpoint under the counting-down pill. Consumed (returns true) with a
+    // stop cue, never applied.
+    if (s_relief_active) {
+        dial_haptics_play(HAPTIC_STOP);
+        return true;
+    }
+
+    // Relative: one detent = exactly one level in the turned direction, from
+    // whatever level is displayed (dial_rel_step snaps an off-grid value onto
+    // the grid as it moves, so the numeral and the bed always move together).
+    // Absolute: one detent = 1°F within the shipped 55–110 clamp.
+    int nf;
+    if (s_rel) {
+        nf = dial_rel_step(s_shown_f, detents);
+    } else {
+        nf = s_shown_f + detents;
+        if (nf < DIAL_TEMP_MIN_F) nf = DIAL_TEMP_MIN_F;
+        if (nf > DIAL_TEMP_MAX_F) nf = DIAL_TEMP_MAX_F;
+    }
+    if (nf == s_shown_f) {                          // pinned at the range stop
         dial_haptics_play(HAPTIC_STOP);
         int dir = detents > 0 ? 1 : -1;
         anim_nudge(s_num_box, dir);
@@ -725,6 +943,7 @@ static bool on_knob(int detents)
     s_shown_f = nf;
     render_numeral(nf);
     level_render(nf);
+    position_handle(nf);
     anim_zoom_bump(s_temp_lbl);
     post_temp(nf);
     return true;
@@ -741,6 +960,10 @@ static bool on_knob(int detents)
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return false;
+    // Never navigate while the setpoint handle is being dragged. The handle
+    // doesn't bubble gestures so this shouldn't fire mid-drag, but a swipe that
+    // grazes it must not both move the temperature and change pages.
+    if (s_dragging) return false;
 
     app_state_t st;
     dial_state_get(&st);

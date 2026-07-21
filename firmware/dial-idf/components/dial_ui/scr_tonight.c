@@ -31,8 +31,13 @@
 
 static lv_obj_t *s_ring;
 static lv_obj_t *s_title_lbl;
-static lv_obj_t *s_bedtime_lbl, *s_bedtime_cap_lbl;
-static lv_obj_t *s_wake_lbl, *s_wake_cap_lbl;
+// Bedtime/wake are each a flex row of two labels — time then setpoint — rather
+// than one "time - value" string: with a relative setpoint the single-string
+// form yields "10:30 PM - -3" (two hyphens that parse as a range or subtraction
+// before a temperature). A gap-separated pair reads cleanly in both scales, and
+// U+00B7 / other separator glyphs aren't in the compiled ASCII+degree subsets.
+static lv_obj_t *s_bedtime_row, *s_bedtime_time, *s_bedtime_temp, *s_bedtime_cap_lbl;
+static lv_obj_t *s_wake_row, *s_wake_time, *s_wake_temp, *s_wake_cap_lbl;
 static lv_obj_t *s_no_sched_lbl;
 static lv_obj_t *s_chip, *s_chip_lbl;
 static lv_obj_t *s_back, *s_back_lbl;
@@ -106,12 +111,47 @@ static void format_time_12h(int total_min, char *out, size_t n)
     snprintf(out, n, "%d:%02d %s", h12, mm, pm ? "PM" : "AM");
 }
 
-// Display-only °C/°F conversion (M4 units toggle) — same convention as
-// scr_dial's water caption.
-static void format_temp(bool units_c, float c, char *out, size_t n)
+// A schedule setpoint, rendered in the active scale. Relative mode shows the
+// nearest −10…+10 level ("+2" / "0" / "-3", Mont 28 carries '+'); absolute mode
+// shows °F, or a one-decimal °C conversion when units_c — same convention as
+// scr_dial's setpoint numeral.
+static void format_temp(bool units_c, bool rel, float c, char *out, size_t n)
 {
-    if (units_c) snprintf(out, n, "%.1f\xC2\xB0", c);
-    else         snprintf(out, n, "%d\xC2\xB0", dial_c_to_f(c));
+    if (rel) {
+        int lvl = dial_rel_from_f(dial_c_to_f(c));
+        if (lvl == 0) snprintf(out, n, "0");
+        else          snprintf(out, n, "%+d", lvl);
+    } else if (units_c) {
+        snprintf(out, n, "%.1f\xC2\xB0", c);
+    } else {
+        snprintf(out, n, "%d\xC2\xB0", dial_c_to_f(c));
+    }
+}
+
+// One schedule block: a centered flex row of a time label and a setpoint label.
+static lv_obj_t *make_sched_row(lv_obj_t *scr, int y, lv_obj_t **time_out, lv_obj_t **temp_out)
+{
+    lv_obj_t *row = lv_obj_create(scr);
+    lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 14, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(row, LV_ALIGN_CENTER, 0, y - CY);
+
+    lv_obj_t *t = lv_label_create(row);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_28, 0);
+    lv_label_set_text(t, "--:--");
+    *time_out = t;
+
+    lv_obj_t *v = lv_label_create(row);
+    lv_obj_set_style_text_font(v, &lv_font_montserrat_28, 0);
+    lv_label_set_text(v, "--");
+    *temp_out = v;
+    return row;
 }
 
 /* ---- picker mode ---------------------------------------------------------*/
@@ -126,7 +166,7 @@ static void render_picker_numeral(void)
 
 static void set_normal_blocks_hidden(bool hidden)
 {
-    lv_obj_t *objs[] = { s_bedtime_lbl, s_bedtime_cap_lbl, s_wake_lbl, s_wake_cap_lbl, s_chip };
+    lv_obj_t *objs[] = { s_bedtime_row, s_bedtime_cap_lbl, s_wake_row, s_wake_cap_lbl, s_chip };
     for (size_t i = 0; i < sizeof(objs) / sizeof(objs[0]); i++) {
         if (hidden) lv_obj_add_flag(objs[i], LV_OBJ_FLAG_HIDDEN);
         else        lv_obj_clear_flag(objs[i], LV_OBJ_FLAG_HIDDEN);
@@ -216,9 +256,11 @@ static void apply_palette_and_state(const app_state_t *st)
     if (s_picker_mode) return;
 
     const zone_state_t *z = &st->zones[dial_state_primary_zone(st)];
-    lv_obj_set_style_text_color(s_bedtime_lbl, pal->ink_primary, 0);
+    lv_obj_set_style_text_color(s_bedtime_time, pal->ink_primary, 0);
+    lv_obj_set_style_text_color(s_bedtime_temp, pal->ink_primary, 0);
     lv_obj_set_style_text_color(s_bedtime_cap_lbl, pal->ink_secondary, 0);
-    lv_obj_set_style_text_color(s_wake_lbl, pal->ink_primary, 0);
+    lv_obj_set_style_text_color(s_wake_time, pal->ink_primary, 0);
+    lv_obj_set_style_text_color(s_wake_temp, pal->ink_primary, 0);
     lv_obj_set_style_text_color(s_wake_cap_lbl, pal->ink_secondary, 0);
     lv_obj_set_style_text_color(s_no_sched_lbl, pal->ink_secondary, 0);
 
@@ -239,25 +281,25 @@ static void apply_palette_and_state(const app_state_t *st)
         return;
     }
     lv_obj_add_flag(s_no_sched_lbl, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_bedtime_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_bedtime_row, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_bedtime_cap_lbl, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_wake_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_wake_row, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_wake_cap_lbl, LV_OBJ_FLAG_HIDDEN);
 
-    char clock_buf[12], temp_buf[12], line[40];
+    char clock_buf[12], temp_buf[12];
     int mins;
 
     if (dial_parse_hhmm(z->sched_bedtime, &mins)) format_time_12h(mins, clock_buf, sizeof(clock_buf));
     else strlcpy(clock_buf, "--:--", sizeof(clock_buf));
-    format_temp(st->units_c, z->sched_bedtime_temp_c, temp_buf, sizeof(temp_buf));
-    snprintf(line, sizeof(line), "%s - %s", clock_buf, temp_buf);
-    lv_label_set_text(s_bedtime_lbl, line);
+    format_temp(st->units_c, st->rel_mode, z->sched_bedtime_temp_c, temp_buf, sizeof(temp_buf));
+    lv_label_set_text(s_bedtime_time, clock_buf);
+    lv_label_set_text(s_bedtime_temp, temp_buf);
 
     if (dial_parse_hhmm(z->sched_wakeup, &mins)) format_time_12h(mins, clock_buf, sizeof(clock_buf));
     else strlcpy(clock_buf, "--:--", sizeof(clock_buf));
-    format_temp(st->units_c, z->sched_wakeup_temp_c, temp_buf, sizeof(temp_buf));
-    snprintf(line, sizeof(line), "%s - %s", clock_buf, temp_buf);
-    lv_label_set_text(s_wake_lbl, line);
+    format_temp(st->units_c, st->rel_mode, z->sched_wakeup_temp_c, temp_buf, sizeof(temp_buf));
+    lv_label_set_text(s_wake_time, clock_buf);
+    lv_label_set_text(s_wake_temp, temp_buf);
 
     if (z->sched_override_applied) lv_obj_clear_flag(s_chip, LV_OBJ_FLAG_HIDDEN);
     else                           lv_obj_add_flag(s_chip, LV_OBJ_FLAG_HIDDEN);
@@ -331,20 +373,14 @@ static void create(lv_obj_t *scr, void *arg)
     lv_label_set_text(s_title_lbl, "TONIGHT");
     lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 64 - CY);
 
-    s_bedtime_lbl = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_bedtime_lbl, &lv_font_montserrat_28, 0);
-    lv_label_set_text(s_bedtime_lbl, "--:-- - --\xC2\xB0");
-    lv_obj_align(s_bedtime_lbl, LV_ALIGN_CENTER, 0, 118 - CY);
+    s_bedtime_row = make_sched_row(scr, 118, &s_bedtime_time, &s_bedtime_temp);
 
     s_bedtime_cap_lbl = lv_label_create(scr);
     lv_obj_set_style_text_font(s_bedtime_cap_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(s_bedtime_cap_lbl, "BEDTIME");
     lv_obj_align(s_bedtime_cap_lbl, LV_ALIGN_CENTER, 0, 146 - CY);
 
-    s_wake_lbl = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_wake_lbl, &lv_font_montserrat_28, 0);
-    lv_label_set_text(s_wake_lbl, "--:-- - --\xC2\xB0");
-    lv_obj_align(s_wake_lbl, LV_ALIGN_CENTER, 0, 198 - CY);
+    s_wake_row = make_sched_row(scr, 198, &s_wake_time, &s_wake_temp);
 
     s_wake_cap_lbl = lv_label_create(scr);
     lv_obj_set_style_text_font(s_wake_cap_lbl, &lv_font_montserrat_12, 0);
@@ -418,8 +454,8 @@ static void destroy(void)
 
     s_ring = NULL;
     s_title_lbl = NULL;
-    s_bedtime_lbl = s_bedtime_cap_lbl = NULL;
-    s_wake_lbl = s_wake_cap_lbl = NULL;
+    s_bedtime_row = s_bedtime_time = s_bedtime_temp = s_bedtime_cap_lbl = NULL;
+    s_wake_row = s_wake_time = s_wake_temp = s_wake_cap_lbl = NULL;
     s_no_sched_lbl = NULL;
     s_chip = s_chip_lbl = NULL;
     s_back = s_back_lbl = NULL;

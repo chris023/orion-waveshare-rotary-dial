@@ -193,6 +193,7 @@ static void apply_baseline(void)
     st->zone_present[ZONE_A] = true;
     st->zone_present[ZONE_B] = true;
     st->units_c = false;
+    st->rel_mode = false;   // absolute by default; relative scenarios opt in
     st->rotation = 0;
     st->haptics_enabled = true;
     st->welcomed = true;
@@ -306,6 +307,28 @@ static void scenario_dial(void)
     snapshot("dial");
 }
 
+// The Home face in RELATIVE scale. Deliberately a POSITIVE, OFF-GRID setpoint:
+// 30.0C -> 86F, which is level +2 (its anchor is 87F/30.5C) — so the render
+// proves the spliced '+' glyph draws AND that an off-grid device value shows as
+// the nearest level. Water below the setpoint keeps the heating overlay + pill
+// on screen, and the neutral notch/"LEVEL" suffix are visible.
+static void scenario_dial_relative(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->rel_mode = true;
+    st->ui_zone = ZONE_A;
+    zone_state_t *a = &st->zones[ZONE_A];
+    a->on = true;
+    snprintf(a->thermal_state, sizeof(a->thermal_state), "heating");
+    a->temp_c = 30.0f;    // off-grid -> 86F -> level +2
+    a->actual_c = 26.0f;  // -> 79F, below setpoint: still warming
+    st->generation++;     // direct field-sets don't bump it; make on_state re-run
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(600);
+    snapshot("dial-relative");
+}
+
 static void scenario_quick(void)
 {
     apply_baseline();
@@ -348,6 +371,30 @@ static void scenario_tonight(void)
     ui_router_go(SCR_TONIGHT, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
     snapshot("tonight");
+}
+
+// Tonight in RELATIVE scale — proves the two-label schedule rows render levels
+// cleanly (no "22:30 - -3" double hyphen) and that a negative level draws.
+static void scenario_tonight_relative(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->rel_mode = true;
+    zone_state_t *a = &st->zones[ZONE_A];
+    a->sched_valid = true;
+    snprintf(a->sched_bedtime, sizeof(a->sched_bedtime), "22:30");
+    a->sched_bedtime_temp_c = 19.0f;   // -> level -5
+    snprintf(a->sched_wakeup, sizeof(a->sched_wakeup), "06:30");
+    a->sched_wakeup_temp_c = 29.0f;    // -> level +1
+    a->sched_override_applied = false;
+    a->sched_override_available = true;
+    // This scenario reuses SCR_TONIGHT/NULL straight after scenario_tonight, so
+    // ui_router_go is a no-op (same id+arg). Bump generation so the dispatcher
+    // re-renders the live screen with this (relative) state.
+    st->generation++;
+    ui_router_go(SCR_TONIGHT, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("tonight-relative");
 }
 
 static void scenario_menu(void)
@@ -444,9 +491,11 @@ int main(void)
     scenario_sidepick();
     scenario_connecting();
     scenario_dial();
+    scenario_dial_relative();
     scenario_quick();
     scenario_boost();
     scenario_tonight();
+    scenario_tonight_relative();
     scenario_menu();
     scenario_settings();
     scenario_wifi_info();
@@ -454,6 +503,6 @@ int main(void)
     scenario_updating();
     scenario_standby();
 
-    printf("done: 17 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
+    printf("done: 19 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
     return 0;
 }

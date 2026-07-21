@@ -33,14 +33,86 @@ typedef enum {
 
 typedef enum { ZONE_A = 0, ZONE_B = 1, ZONE_COUNT = 2 } zone_idx_t;
 
-// Display range in °F (device range is 10–45°C ≈ 50–113°F; keep the familiar
-// bounds the app used). Orion takes °C; the device's own °F lookup table is the
-// linear formula rounded to 0.1°C, so the linear conversion round-trips exactly.
+// ABSOLUTE display range in °F (Fahrenheit/Celsius modes). The device's real
+// range is 10–45°C ≈ 50–113°F, but absolute mode keeps the familiar 55–110
+// the product shipped with (owner decision: widen only in relative mode, so an
+// existing °F user sees no arc/indicator change). Relative mode uses the full
+// 50–113 rails below so all 21 levels are reachable. Orion takes °C; the °F
+// lookup is the linear formula rounded to 0.1°C, so conversion round-trips.
 #define DIAL_TEMP_MIN_F 55
 #define DIAL_TEMP_MAX_F 110
 
 static inline int   dial_c_to_f(float c) { return (int)lroundf(c * 1.8f + 32.0f); }
 static inline float dial_f_to_c(int f)   { return roundf(((f - 32) / 1.8f) * 10.0f) / 10.0f; }
+
+/*
+ * RELATIVE temperature scale (Orion's third temperature_scale table). A signed
+ * −10…+10 "level" scale where 0 = 27.5°C (81.5°F), the midpoint of the device
+ * range; negative is cooler, positive warmer. It is purely a display/input
+ * convention on our side — the wire is always °C (set_zone takes Celsius; there
+ * is no scale/level parameter on any Orion tool, confirmed by live probe).
+ *
+ * We keep the internal setpoint in whole °F either way (dial_state's temp is
+ * °C on the wire, °F for UI). Each level is carried by the whole °F below,
+ * chosen so its dial_f_to_c() lands strictly inside that level's Celsius
+ * bracket — so a device poll can never nudge the displayed level, and every
+ * value we write is on Orion's grid. These two tables are the ONLY source of
+ * truth; the discover-time tripwire in main.c re-checks them against the live
+ * temperature_scale.relative and logs loudly on any mismatch.
+ *
+ *   DIAL_REL_F[L+10]  = whole °F carrying level L (−10…+10).
+ *   DIAL_REL_LO_F[i]  = lowest whole °F that belongs to level (−9 + i); the
+ *                       nearest-level boundaries, derived from the CELSIUS
+ *                       midpoints (not midpoints of the °F carriers, which
+ *                       disagree at a few boundaries). Ties resolve toward the
+ *                       WARMER level, consistently (that single rule also picks
+ *                       the level-0 carrier 82 over 81 and the +8 boundary 104).
+ */
+#define DIAL_REL_MIN (-10)
+#define DIAL_REL_MAX ( 10)
+#define DIAL_REL_MIN_F  50   // level −10 rail (= 10.0°C)
+#define DIAL_REL_MAX_F 113   // level +10 rail (= 45.0°C)
+
+static const uint8_t DIAL_REL_F[21] = {
+    50, 54, 57, 61, 64, 66, 69, 73, 76, 79, 82,
+    84, 87, 90, 92, 95, 99, 102, 106, 109, 113
+};
+static const uint8_t DIAL_REL_LO_F[20] = {
+    52, 56, 59, 63, 65, 68, 72, 75, 78, 81,
+    83, 86, 89, 91, 94, 97, 101, 104, 108, 112
+};
+
+// Nearest relative level for a whole °F (clamped to −10…+10). Uses the boundary
+// table: f is at least level (−9 + i) iff f ≥ DIAL_REL_LO_F[i].
+static inline int dial_rel_from_f(int f)
+{
+    int lvl = DIAL_REL_MIN;
+    for (int i = 0; i < 20; i++)
+        if (f >= DIAL_REL_LO_F[i]) lvl = DIAL_REL_MIN + 1 + i;
+    return lvl;
+}
+
+// The whole °F carrying a level (level clamped to range).
+static inline int dial_rel_to_f(int level)
+{
+    if (level < DIAL_REL_MIN) level = DIAL_REL_MIN;
+    if (level > DIAL_REL_MAX) level = DIAL_REL_MAX;
+    return DIAL_REL_F[level - DIAL_REL_MIN];
+}
+
+// One detent = exactly one level in the turned direction, from whatever level
+// is currently DISPLAYED (so an off-grid device value snaps onto the grid in
+// the direction the user turned — the numeral and the bed always move together
+// or not at all). Returns the new carrier °F; equals f only when pinned at a
+// rail (caller treats that as the range stop).
+static inline int dial_rel_step(int f, int detents)
+{
+    int cur = dial_rel_from_f(f);
+    int nl  = cur + detents;
+    if (nl < DIAL_REL_MIN) nl = DIAL_REL_MIN;
+    if (nl > DIAL_REL_MAX) nl = DIAL_REL_MAX;
+    return (nl == cur) ? f : dial_rel_to_f(nl);
+}
 
 // Parse a schedule "HH:MM" (24h) time string into minutes-from-midnight.
 // Returns false (leaving *out_min untouched) on any malformed input. Shared
@@ -146,9 +218,17 @@ typedef struct {
 
     // --- Settings (M4) ---
     // Display units: false = °F (canonical/internal — the store's temp_c is
-    // always °C regardless), true = °C for display only. The arc range and
-    // the knob's 1°F detent stay °F either way.
+    // always °C regardless), true = °C for display only. In RELATIVE mode this
+    // governs only the absolute readouts that persist there (the measured water
+    // caption), never the setpoint hero.
     bool units_c;
+    // Temperature SCALE for the setpoint hero: false = absolute (°F/°C per
+    // units_c), true = relative levels (−10…+10). Default is relative on a
+    // fresh device, absolute on one upgrading from ≤v1.0.6 (see
+    // dial_state_restore_prefs — an existing user must not have the big number
+    // silently change meaning under an OTA). The wire is °C regardless; the
+    // internal setpoint stays whole °F in both scales.
+    bool rel_mode;
     // Screen rotation in quarter turns clockwise (0..3), persisted. The dial
     // sits on a nightstand and its cable exits one edge, so which way is "up"
     // is a property of the room, not of the device.
@@ -238,6 +318,9 @@ void dial_state_set_welcomed(void);
 void dial_state_set_side_picked(void);
 // Set the display-units preference; persists to NVS "ui"/"units".
 void dial_state_set_units_c(bool units_c);
+// Set the temperature-scale preference (relative vs absolute); persists to NVS
+// "ui"/"relmode".
+void dial_state_set_rel_mode(bool rel_mode);
 // Set the haptics-enabled preference; persists to NVS "ui"/"haptics". Does
 // NOT itself call dial_haptics_set_enabled() — dial_state has no business
 // knowing about the haptics driver, so callers do both.

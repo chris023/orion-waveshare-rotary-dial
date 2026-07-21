@@ -22,7 +22,7 @@
 
 static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
-static lv_obj_t *s_val_units, *s_val_haptics, *s_val_rotation;
+static lv_obj_t *s_val_scale, *s_val_units, *s_val_haptics, *s_val_rotation;
 
 typedef enum { CONFIRM_RELINK = 0, CONFIRM_FACTORY, CONFIRM_COUNT } confirm_id_t;
 static lv_obj_t   *s_val_confirm[CONFIRM_COUNT];
@@ -128,6 +128,18 @@ static void row_rotation_cb(lv_event_t *e)
     dial_haptics_play(HAPTIC_TICK);
 }
 
+// Setpoint scale: Absolute (°F/°C) <-> Relative (−10…+10 levels). Independent
+// of Units below, which continues to govern the absolute readouts (the water
+// caption) in either scale.
+static void row_scale_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    dial_haptics_play(HAPTIC_TICK);
+    dial_state_set_rel_mode(!st.rel_mode);
+}
+
 static void row_units_cb(lv_event_t *e)
 {
     (void)e;
@@ -201,6 +213,7 @@ static void create(lv_obj_t *scr, void *arg)
     // ui_zone that one swipe on the dial already sets (and persists) — the row
     // changed nothing you couldn't change faster by swiping.
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
+    make_row(s_list, "Scale",         row_scale_cb,         &s_val_scale);
     make_row(s_list, "Units",         row_units_cb,         &s_val_units);
     make_row(s_list, "Rotation",      row_rotation_cb,      &s_val_rotation);
     make_row(s_list, "Haptics",       row_haptics_cb,       &s_val_haptics);
@@ -228,7 +241,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 64 - CY);
 
     apply_palette(scr);
-    dial_list_settle(s_list, 1);   // open on "My side", not on Back
+    dial_list_settle(s_list, 1);   // open on "Scale" (index 1), not on Back
     s_confirm_timer = lv_timer_create(confirm_timer_cb, 250, NULL);
 }
 
@@ -237,7 +250,7 @@ static void destroy(void)
     if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
     s_list = NULL;
     s_title_lbl = NULL;
-    s_val_units = s_val_haptics = s_val_rotation = NULL;
+    s_val_scale = s_val_units = s_val_haptics = s_val_rotation = NULL;
     for (int i = 0; i < CONFIRM_COUNT; i++) s_val_confirm[i] = NULL;
     s_armed = CONFIRM_COUNT;
 }
@@ -250,7 +263,13 @@ static void on_state(const app_state_t *st)
     static const char *ROT[] = { "0\xC2\xB0", "90\xC2\xB0", "180\xC2\xB0", "270\xC2\xB0" };
     lv_label_set_text(s_val_rotation, ROT[st->rotation & 3]);
 
-    lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
+    lv_label_set_text(s_val_scale, st->rel_mode ? "Relative" : "Absolute");
+    // In relative mode Units governs only the water readout, so qualify it —
+    // otherwise tapping Units with the hero in levels looks like it did nothing.
+    if (st->rel_mode)
+        lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C (water)" : "\xC2\xB0" "F (water)");
+    else
+        lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
     lv_label_set_text(s_val_haptics, st->haptics_enabled ? "On" : "Off");
 }
 

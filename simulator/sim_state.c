@@ -68,6 +68,12 @@ void dial_state_set_units_c(bool units_c)
     s_state.generation++;
 }
 
+void dial_state_set_rel_mode(bool rel_mode)
+{
+    s_state.rel_mode = rel_mode;
+    s_state.generation++;
+}
+
 void dial_state_set_haptics_enabled(bool enabled)
 {
     s_state.haptics_enabled = enabled;

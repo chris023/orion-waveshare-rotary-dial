@@ -760,6 +760,54 @@ static bool orion_discover_device(void)
             if (uid && uid->valuestring)
                 strlcpy(s_zone_uuid[zi], uid->valuestring, sizeof(s_zone_uuid[0]));
         }
+
+        // Relative-scale tripwire. Our −10…+10 tables (dial_state.h) are
+        // compiled constants: relative mode is a client-side view, and Orion's
+        // set_zone only takes °C, so there is nothing to adopt at runtime. But
+        // if Orion ever reshapes temperature_scale.relative or its range, the
+        // dial would silently show wrong levels. Re-validate the live payload
+        // against the compiled tables and log LOUDLY on any mismatch — a
+        // release-blocking signal to regenerate the tables, NOT a runtime
+        // adoption (which would mean the worker mutating tables the LVGL task
+        // reads). Log-only; touches no state, bumps no generation.
+        cJSON *scale = cJSON_GetObjectItem(dev0, "temperature_scale");
+        cJSON *rel   = scale ? cJSON_GetObjectItem(scale, "relative") : NULL;
+        if (cJSON_IsArray(rel)) {
+            int n = cJSON_GetArraySize(rel), mismatch = 0;
+            if (n != 21)
+                ESP_LOGE(TAG, "relative scale has %d entries, expected 21 — compiled table is stale", n);
+            cJSON *e;
+            cJSON_ArrayForEach(e, rel) {
+                cJSON *in  = cJSON_GetObjectItem(e, "in");
+                cJSON *out = cJSON_GetObjectItem(e, "out");
+                if (!cJSON_IsNumber(in) || !cJSON_IsNumber(out)) continue;
+                int lvl = in->valueint;
+                int got = dial_rel_from_f(dial_c_to_f((float)out->valuedouble));
+                if (got != lvl) {
+                    mismatch++;
+                    ESP_LOGE(TAG, "relative scale MISMATCH: level %d = %.1f C maps to our level %d "
+                                  "-- regenerate DIAL_REL_F/DIAL_REL_LO_F", lvl, out->valuedouble, got);
+                }
+            }
+            if (n == 21 && mismatch == 0)
+                ESP_LOGD(TAG, "relative scale table matches compiled DIAL_REL");
+        } else {
+            ESP_LOGW(TAG, "list_devices has no temperature_scale.relative -- "
+                          "relative mode uses the compiled fallback table");
+        }
+        cJSON *range = cJSON_GetObjectItem(dev0, "temperature_range");
+        if (range) {
+            cJSON *mn = cJSON_GetObjectItem(range, "min");
+            cJSON *mx = cJSON_GetObjectItem(range, "max");
+            if (cJSON_IsNumber(mn) && cJSON_IsNumber(mx)) {
+                int lo = dial_c_to_f((float)mn->valuedouble);
+                int hi = dial_c_to_f((float)mx->valuedouble);
+                if (lo != DIAL_REL_MIN_F || hi != DIAL_REL_MAX_F)
+                    ESP_LOGE(TAG, "temperature_range %.0f-%.0f C = %d-%d F != relative rails %d-%d F",
+                             mn->valuedouble, mx->valuedouble, lo, hi, DIAL_REL_MIN_F, DIAL_REL_MAX_F);
+            }
+        }
+
         if (ok) dial_state_commit(mut_identity, &ident);
     }
     cJSON_Delete(root);

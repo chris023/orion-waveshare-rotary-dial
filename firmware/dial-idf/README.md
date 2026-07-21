@@ -165,7 +165,9 @@ itself:
   the menu. A long-press on the dial screen opens quick actions (bed off,
   boost heat/cool, etc.).
 - **Menu → Tonight:** tonight's schedule and a one-night override.
-- **Menu → Settings:** units (°C/°F), screen rotation, haptics on/off, and two
+- **Menu → Settings:** temperature scale (Absolute °F/°C, or Orion's −10…+10
+  relative levels), units (°C/°F, used for the absolute readouts), screen
+  rotation, haptics on/off, and two
   destructive actions guarded by a tap-twice-within-3-seconds confirm
   ("Tap again to confirm"): **Re-link Orion** (forgets the stored Orion
   tokens and restarts into the link step) and **Factory reset** (erases all
