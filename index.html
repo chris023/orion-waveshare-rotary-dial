@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orion Dial — flash from your browser</title>
+<meta name="description" content="Flash the Orion Dial firmware onto a Waveshare ESP32-S3 knob straight from your browser. No software to install.">
+<style>
+  :root {
+    --bg: #0b0b0c;
+    --bg-raised: #17171a;
+    --border: #2a2a2e;
+    --text: #f2efe9;
+    --text-dim: #a8a29e;
+    --accent: #e8590c;
+    --accent-text: #ff8a4c;
+    --accent-tint: rgba(232, 89, 12, 0.14);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+    padding: 3rem 1.25rem 4rem;
+  }
+
+  main {
+    max-width: 640px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 2rem;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.5rem;
+  }
+
+  h1 .dot {
+    color: var(--accent);
+  }
+
+  h2 {
+    font-size: 1.05rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin: 2.5rem 0 0.9rem;
+  }
+
+  p { margin: 0 0 1rem; }
+
+  .disclaimer {
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    border-left: 3px solid var(--border);
+    padding-left: 0.75rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .pitch {
+    font-size: 1.05rem;
+    color: var(--text);
+    margin-bottom: 2rem;
+  }
+
+  a { color: var(--accent-text); }
+  a:hover { text-decoration: none; }
+
+  .install-card {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.75rem;
+    text-align: center;
+  }
+
+  esp-web-install-button {
+    display: inline-block;
+  }
+
+  button[slot="activate"] {
+    font: inherit;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--accent);
+    border: none;
+    border-radius: 10px;
+    padding: 0.85rem 1.75rem;
+    cursor: pointer;
+  }
+
+  button[slot="activate"]:hover {
+    background: #d14e0a;
+  }
+
+  [slot="unsupported"], [slot="not-allowed"] {
+    display: block;
+    color: var(--text-dim);
+    font-size: 0.95rem;
+  }
+
+  .browser-note {
+    margin-top: 0.9rem;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+
+  ul {
+    margin: 0 0 1rem;
+    padding-left: 1.2rem;
+  }
+
+  li { margin-bottom: 0.5rem; }
+
+  .callout {
+    background: var(--accent-tint);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    padding: 1.1rem 1.25rem;
+    margin: 1.25rem 0;
+  }
+
+  .callout .callout-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 700;
+    color: var(--accent-text);
+    margin-bottom: 0.4rem;
+  }
+
+  .callout p:last-child { margin-bottom: 0; }
+
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9rem;
+    color: var(--text-dim);
+  }
+
+  footer .links {
+    display: flex;
+    gap: 1.25rem;
+  }
+
+  #latest-version {
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Orion Dial<span class="dot">.</span></h1>
+
+  <p class="disclaimer">
+    Independent, community-built project. Not affiliated with, endorsed by,
+    or supported by Orion Sleep or Waveshare.
+  </p>
+
+  <p class="pitch">
+    A bedside dial for your Orion Sleep dual-zone topper — turn a knob to
+    change the temperature of your side of the bed. Flash it straight from
+    this page; no software to install.
+  </p>
+
+  <div class="install-card">
+    <esp-web-install-button manifest="./manifest.json">
+      <button slot="activate">Install Orion Dial firmware</button>
+      <span slot="unsupported">
+        Your browser can't flash over USB. Open this page in
+        <strong>Chrome</strong> or <strong>Edge</strong> on a desktop
+        computer — Safari and Firefox don't support the Web Serial API
+        this needs.
+      </span>
+      <span slot="not-allowed">
+        Web Serial is blocked on this page. Try again in a normal browser
+        tab (not embedded in another app).
+      </span>
+    </esp-web-install-button>
+    <p class="browser-note">Works in Chrome or Edge. Not Safari or Firefox.</p>
+  </div>
+
+  <h2>Before you click</h2>
+  <ul>
+    <li>Use a USB-C <strong>data</strong> cable (not a charge-only cable),
+      plugged straight into your computer — not through a hub.</li>
+    <li>When the picker asks you to choose a port, pick it, then hit
+      <strong>Connect</strong>.</li>
+    <li>If this is a brand-new dial, choose the option to
+      <strong>erase</strong> the device before installing, for a clean
+      slate.</li>
+  </ul>
+
+  <div class="callout">
+    <div class="callout-title">No port shows up? Flip the plug — at the dial's end.</div>
+    <p>
+      This board's single USB-C socket wires its two data-pin pairs to two
+      different chips. One plug orientation reaches the main ESP32-S3;
+      flipped 180°, it reaches a companion chip instead. If no device
+      appears in the picker — or the wrong one does — pull the connector
+      out of <strong>the dial</strong>, rotate that same connector 180°
+      (upside down), and push it back into the dial. Keep both ends of the
+      cable where they are — don't swap which end goes to the computer;
+      flipping the computer end does nothing. You want the port that shows
+      up as an <strong>ESP32-S3</strong> or
+      <strong>"USB JTAG/serial debug unit"</strong>.
+    </p>
+  </div>
+
+  <h2>After flashing</h2>
+  <p>
+    Everything else happens on the dial's own screen: Wi-Fi setup, pairing
+    with your Orion account, choosing which side of the bed it controls.
+    Future firmware updates arrive over the air, straight from this
+    project's GitHub Releases — you won't need this page again unless you
+    get a new board.
+  </p>
+
+  <footer>
+    <span id="latest-version">Latest firmware: checking&hellip;</span>
+    <span class="links">
+      <a href="https://github.com/chris023/orion-waveshare-rotary-dial">Repo</a>
+      <a href="https://github.com/chris023/orion-waveshare-rotary-dial/blob/main/firmware/dial-idf/README.md">Firmware README</a>
+      <a href="https://github.com/chris023/orion-waveshare-rotary-dial/blob/main/LICENSE">License</a>
+    </span>
+    <p style="margin-top:.8rem;font-size:.75rem;opacity:.65">
+      Firmware &copy; 2026 Chris Meyer, licensed
+      <a href="https://polyformproject.org/licenses/noncommercial/1.0.0">PolyForm
+      Noncommercial 1.0.0</a> — free for personal, noncommercial use; see
+      <a href="https://github.com/chris023/orion-waveshare-rotary-dial/blob/main/THIRD_PARTY_LICENSES.md">third-party
+      notices</a>. Flashing powered by
+      <a href="https://esphome.github.io/esp-web-tools/">ESP Web Tools</a>.
+    </p>
+  </footer>
+</main>
+
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<script>
+  (function () {
+    var el = document.getElementById("latest-version");
+    fetch("https://api.github.com/repos/chris023/orion-waveshare-rotary-dial/releases/latest")
+      .then(function (r) {
+        if (!r.ok) throw new Error("bad response");
+        return r.json();
+      })
+      .then(function (data) {
+        if (data && data.tag_name) {
+          el.textContent = "Latest firmware: " + data.tag_name;
+        } else {
+          throw new Error("no tag_name");
+        }
+      })
+      .catch(function () {
+        el.textContent = "Latest firmware: see GitHub Releases";
+      });
+  })();
+</script>
+</body>
+</html>
