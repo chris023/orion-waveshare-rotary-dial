@@ -114,6 +114,23 @@
     font-size: 0.85rem;
     color: var(--text-dim);
   }
+  /* Deliberately quiet: the beta channel is opt-in, so it sits below the
+     primary action rather than competing with it. */
+  .beta-toggle {
+    display: block;
+    margin-top: 1.1rem;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .beta-toggle input { margin-right: 0.4rem; }
+  .beta-note {
+    display: block;
+    margin-top: 0.25rem;
+    margin-left: 1.35rem;
+    font-size: 0.78rem;
+    opacity: 0.75;
+  }
 
   ul {
     margin: 0 0 1rem;
@@ -194,7 +211,28 @@
       </span>
     </esp-web-install-button>
     <p class="browser-note">Works in Chrome or Edge. Not Safari or Firefox.</p>
+    <label class="beta-toggle">
+      <input type="checkbox" id="beta-checkbox">
+      Install beta build instead
+      <span class="beta-note">Pre-release. Newer features, less tested — the
+        dial can switch back to stable builds later under Update.</span>
+    </label>
   </div>
+
+  <script>
+    // Swapping the manifest is the whole channel switch: manifest-beta.json
+    // points at firmware/beta/, which only prerelease tags publish to.
+    // esp-web-tools reads the attribute when the button is activated, so
+    // flipping it before the click is enough — no page reload.
+    (function () {
+      var box = document.getElementById('beta-checkbox');
+      var btn = document.querySelector('esp-web-install-button');
+      if (!box || !btn) return;
+      box.addEventListener('change', function () {
+        btn.setAttribute('manifest', box.checked ? './manifest-beta.json' : './manifest.json');
+      });
+    })();
+  </script>
 
   <h2>Before you click</h2>
   <ul>
