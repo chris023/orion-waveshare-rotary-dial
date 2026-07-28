@@ -10,6 +10,14 @@
  * on both hosts verifies against dial_oauth_root_ca() -- the same embedded
  * multi-root PEM used for Orion already covers GitHub's chains too.
  *
+ * Beta channel: dial_ota_check(beta) takes the caller's current
+ * dial_state.beta preference (SCR_UPDATE's "Beta builds" toggle). Off, this
+ * is exactly today's behavior. On, it queries the releases LIST endpoint
+ * instead of /releases/latest (which by definition excludes prereleases)
+ * and picks the newest by version among the entries it inspects, tags like
+ * "dial-v1.1.0-beta.1" included -- see is_newer()'s semver §11 prerelease
+ * tiebreak in the .c file.
+ *
  * Threading: dial_ota_check/download_and_apply are blocking and worker-task
  * only (same discipline as dial_mcp/dial_oauth). dial_ota_get() is a
  * mutex-guarded snapshot safe to call from any task (mirrors dial_state_get,
@@ -45,13 +53,19 @@ typedef struct {
 // Snapshot the current status under the internal lock. Safe from any task.
 void dial_ota_get(dial_ota_info_t *out);
 
-// Blocking: GET the latest GitHub release, compare its tag_name (stripped of
+// Blocking: GET the latest GitHub release (beta == false, today's
+// /releases/latest -- prereleases excluded by GitHub itself) or the newest
+// release INCLUDING prereleases (beta == true, the /releases list endpoint,
+// scanned defensively -- see dial_ota.c), compare its tag_name (stripped of
 // the "dial-v" prefix) against the running esp_app_get_description()
-// version, and -- if newer -- record the "orion-dial.bin" asset's download
-// URL for a subsequent dial_ota_download_and_apply(). Leaves status
-// OTA_AVAILABLE (newer found), OTA_IDLE (already current, or nothing to
-// compare), or OTA_FAILED (network/parse error, see .err). Worker task only.
-bool dial_ota_check(void);
+// version -- prerelease-aware, semver §11 -- and -- if newer -- record the
+// "orion-dial.bin" asset's download URL for a subsequent
+// dial_ota_download_and_apply(). Leaves status OTA_AVAILABLE (newer found),
+// OTA_IDLE (already current, or nothing to compare), or OTA_FAILED
+// (network/parse error, see .err). Worker task only. `beta` is the caller's
+// current dial_state_t.beta snapshot -- this component doesn't depend on
+// dial_state, so the caller decides the channel on every call.
+bool dial_ota_check(bool beta);
 
 // Blocking: esp_https_ota the asset URL captured by the last dial_ota_check
 // that found OTA_AVAILABLE. progress_cb (may be NULL) is invoked with 0-100

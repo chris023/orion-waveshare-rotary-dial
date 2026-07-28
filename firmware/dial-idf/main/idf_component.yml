@@ -5,3 +5,9 @@ dependencies:
   lvgl/lvgl:
     version: "8.4.0"
     public: true
+
+  # mDNS was extracted from core ESP-IDF (same story as cJSON — see
+  # components/dial_oauth/idf_component.yml); used for the stable
+  # orion-dial-xxxxxx.local OAuth redirect hostname (main.c's mdns_bringup).
+  espressif/mdns:
+    version: "1.11.3"

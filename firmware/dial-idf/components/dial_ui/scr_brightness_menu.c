@@ -1,25 +1,35 @@
 /*
- * SCR_ABOUT — device/about sub-screen, reached from SCR_MENU. A single
- * scrollable, read-only list: Firmware/IDF/Serial identifiers. There is no
- * other entry point (no schedule, no zone) so on_state has nothing to gate
- * on besides its own root pointer.
+ * SCR_BRIGHTNESS_MENU — the Day/Night brightness submenu, reached from
+ * scr_settings.c's single "Brightness" row (owner requirement: collapse the
+ * two brightness rows that used to live directly in Settings into the same
+ * submenu shape as the Update screen). A single scrollable list:
  *
- * The Software update control this screen used to own (M6) moved to its own
- * SCR_UPDATE sub-screen (M7, reached from SCR_MENU's "Update" row) — see
- * scr_update.c for the status-driven row, the tap-twice-to-confirm install,
- * and the FAILED-clearing teardown that all lived here before the split.
+ *   < Back   -> SCR_SETTINGS
+ *   Day      value = the current day percent (st->bri_day_pct); tap opens
+ *            the full-screen SCR_BRIGHTNESS picker with packed arg 0.
+ *   Night    value = the current night percent (st->bri_night_pct); tap
+ *            opens SCR_BRIGHTNESS with packed arg 1.
+ *
+ * The picker (scr_brightness.c) owns the live preview and the actual
+ * commit, same as when these two rows lived in Settings directly — this
+ * screen only ever shows the last-committed percent and, on both of the
+ * picker's exit paths, is where the user lands back.
+ *
+ * No other entry point (no schedule, no zone), so on_state has nothing to
+ * gate on besides its own root pointer — same shape as every other menu
+ * sub-screen (scr_settings.c, scr_about.c, scr_update.c).
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
 #include "dial_list.h"
-#include "esp_app_desc.h"
 
 #define CY 180
 #define ROW_H 76
 
 static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
-static lv_obj_t *s_val_serial;
+static lv_obj_t *s_val_day;
+static lv_obj_t *s_val_night;
 
 /* ---- row factory (scr_settings.c's, ported verbatim) --------------------*/
 
@@ -53,13 +63,31 @@ static lv_obj_t *make_row(lv_obj_t *parent, const char *label_txt, lv_event_cb_t
 
 /* ---- row actions ----------------------------------------------------------*/
 
-// Row 0 on every menu sub-screen (see scr_settings.c): the right-swipe still
-// works, but it isn't discoverable on its own.
+// Row 0 on every menu sub-screen: the right-swipe still works, but it isn't
+// discoverable on its own.
 static void row_back_cb(lv_event_t *e)
 {
     (void)e;
     dial_haptics_play(HAPTIC_TICK);
-    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+    ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+}
+
+// Both open the full-screen SCR_BRIGHTNESS picker, packing which row it was
+// opened from (0 = day, 1 = night) — plain navigation, same as every other
+// row on this screen. The picker owns the live preview and commits on its
+// own exit, then returns here (not to Settings — see scr_brightness.c).
+static void row_day_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)0, LV_SCR_LOAD_ANIM_NONE);
+}
+
+static void row_night_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)1, LV_SCR_LOAD_ANIM_NONE);
 }
 
 /* ---- palette ---------------------------------------------------------------*/
@@ -93,41 +121,42 @@ static void create(lv_obj_t *scr, void *arg)
     s_list = dial_list_create(scr, ROW_H);
 
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
+    make_row(s_list, "Day",   row_day_cb,   &s_val_day);
+    make_row(s_list, "Night", row_night_cb, &s_val_night);
 
-    lv_obj_t *fw_val, *idf_val;
-    make_row(s_list, "Firmware", NULL, &fw_val);
-    make_row(s_list, "IDF",      NULL, &idf_val);
-    make_row(s_list, "Serial",   NULL, &s_val_serial);
-
-    const esp_app_desc_t *desc = esp_app_get_description();
-    char fw[36];
-    snprintf(fw, sizeof(fw), "v%s", desc->version);
-    lv_label_set_text(fw_val, fw);
-    lv_label_set_text(idf_val, desc->idf_ver);
-    lv_label_set_text(s_val_serial, "--");   // filled from the state snapshot on first on_state
-
-    // Created AFTER the list so it draws over rows scrolling beneath it.
+    // Created AFTER the list so it draws over rows scrolling beneath it —
+    // same fixed title slot the other menu sub-screens use.
     s_title_lbl = lv_label_create(scr);
     lv_obj_set_style_text_font(s_title_lbl, &lv_font_montserrat_16, 0);
-    lv_label_set_text(s_title_lbl, "ABOUT");
+    lv_label_set_text(s_title_lbl, "BRIGHTNESS");
     lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 64 - CY);
 
     apply_palette(scr);
-    dial_list_settle(s_list, 1);   // open on "Firmware", not on Back
+    dial_list_settle(s_list, 1);   // open on "Day", not on Back
 }
 
 static void destroy(void)
 {
-    s_title_lbl = NULL;
     s_list = NULL;
-    s_val_serial = NULL;
+    s_title_lbl = NULL;
+    s_val_day = NULL;
+    s_val_night = NULL;
 }
 
 static void on_state(const app_state_t *st)
 {
     if (!s_list) return;
     apply_palette(lv_obj_get_parent(s_list));
-    lv_label_set_text(s_val_serial, st->serial[0] ? st->serial : "--");
+
+    // Plain read of the last-committed values — SCR_BRIGHTNESS owns the live
+    // preview and the actual commit; this screen just mirrors app_state_t
+    // (same contract these two rows had when they lived directly in
+    // scr_settings.c).
+    char buf[8];
+    snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_day_pct);
+    lv_label_set_text(s_val_day, buf);
+    snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_night_pct);
+    lv_label_set_text(s_val_night, buf);
 }
 
 // The knob walks the focused row (one per detent, dial_list's rotor snap) —
@@ -143,11 +172,11 @@ static bool on_knob(int detents)
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_RIGHT) return false;
-    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+    ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
     return true;
 }
 
-const ui_screen_t scr_about = {
+const ui_screen_t scr_brightness_menu = {
     .create = create, .destroy = destroy, .on_state = on_state,
     .on_knob = on_knob, .on_gesture = on_gesture,
 };

@@ -9,11 +9,11 @@
  * zoomed/faded for the round panel; knob walks one row per detent, a finger
  * drag free-scrolls then snaps). Tap activates a row. The two destructive
  * rows (re-link/factory reset) use a tap-twice-within-3s confirm pattern
- * instead of firing immediately. The two brightness rows (Day/Night) are
- * plain navigation rows, like every other row here: a tap opens the
- * full-screen SCR_BRIGHTNESS picker (scr_brightness.c), which owns the
- * live dial_power_preview() fade and the actual commit — this screen only
- * ever shows the last-committed percent, read straight from app_state_t.
+ * instead of firing immediately. "Brightness" is a plain navigation row,
+ * like Scale/Units/Rotation/Haptics: a tap opens the SCR_BRIGHTNESS_MENU
+ * submenu (scr_brightness_menu.c), which holds the actual Day/Night rows —
+ * collapsed out of this list (M7) so a single value cell here never has to
+ * summarize two independent percentages.
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
@@ -26,9 +26,7 @@
 
 static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
-static lv_obj_t *s_val_scale, *s_val_units, *s_val_haptics, *s_val_rotation;
-static lv_obj_t *s_val_bri_day;
-static lv_obj_t *s_val_bri_night;
+static lv_obj_t *s_val_scale, *s_val_units, *s_val_sched_follow, *s_val_haptics, *s_val_rotation;
 
 typedef enum { CONFIRM_RELINK = 0, CONFIRM_FACTORY, CONFIRM_COUNT } confirm_id_t;
 static lv_obj_t   *s_val_confirm[CONFIRM_COUNT];
@@ -155,34 +153,61 @@ static void row_units_cb(lv_event_t *e)
     dial_state_set_units_c(!st.units_c);
 }
 
+// "Temp until": names the OUTCOME the user actually cares about — how
+// long the temperature they just dialed survives — rather than the
+// mechanism ("dial adjusts what?"). "Next step" (default) makes a knob turn during
+// tonight's active sleep-schedule phase retarget just that phase, leaving
+// the rest of tonight's schedule in control — matches the Orion app.
+// "Morning" instead holds the new setpoint for the rest of the night, this
+// dial's pre-M8 behavior. See app_state_t.sched_follow and main.c's
+// temp_write_phase()/sleep_phase_now() for the write-path logic this picks.
+static void row_sched_follow_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    dial_haptics_play(HAPTIC_TICK);
+    dial_state_set_sched_follow(!st.sched_follow);
+}
+
+// Off -> Low -> High -> Auto -> Off, same cycle-through-a-fixed-set idiom
+// row_rotation_cb uses for its four values (just not a plain modulo, since
+// the stored numeric values are the legacy NVS encoding — see dial_state.h's
+// app_state_t.haptics_level — not this cycle's own display ordering).
+static uint8_t next_haptics_level(uint8_t cur)
+{
+    switch ((haptic_level_t)cur) {
+    case HAPTIC_LEVEL_OFF:  return HAPTIC_LEVEL_LOW;
+    case HAPTIC_LEVEL_LOW:  return HAPTIC_LEVEL_HIGH;
+    case HAPTIC_LEVEL_HIGH: return HAPTIC_LEVEL_AUTO;
+    case HAPTIC_LEVEL_AUTO:
+    default:                return HAPTIC_LEVEL_OFF;
+    }
+}
+
 static void row_haptics_cb(lv_event_t *e)
 {
     (void)e;
     app_state_t st;
     dial_state_get(&st);
-    bool enabled = !st.haptics_enabled;
-    dial_haptics_set_enabled(enabled);
-    dial_state_set_haptics_enabled(enabled);
-    dial_haptics_play(HAPTIC_CONFIRM);   // audible only if now enabled
+    uint8_t next = next_haptics_level(st.haptics_level);
+    // Set the level BEFORE playing the confirm, so the confirm itself is felt
+    // at the level the user just chose (silent if they just landed on Off —
+    // that silence IS the confirmation there).
+    dial_haptics_set_level((haptic_level_t)next);
+    dial_state_set_haptics_level(next);
+    dial_haptics_play(HAPTIC_CONFIRM);
 }
 
-// Both open the full-screen SCR_BRIGHTNESS picker (scr_brightness.c), packing
-// which row it was opened from (0 = day, 1 = night) — plain navigation, same
-// as every other row on this screen. The picker owns the live preview and
-// commits on its own exit; this screen just shows whatever it last committed
-// (see on_state).
-static void row_bri_day_cb(lv_event_t *e)
+// Opens the Day/Night brightness submenu (scr_brightness_menu.c) — plain
+// navigation, same as every other row on this screen. No value label: a
+// single cell here can't summarize two independent percentages without
+// reading as noise, so the submenu's own Day/Night rows carry those.
+static void row_brightness_cb(lv_event_t *e)
 {
     (void)e;
     dial_haptics_play(HAPTIC_TICK);
-    ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)0, LV_SCR_LOAD_ANIM_NONE);
-}
-
-static void row_bri_night_cb(lv_event_t *e)
-{
-    (void)e;
-    dial_haptics_play(HAPTIC_TICK);
-    ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)1, LV_SCR_LOAD_ANIM_NONE);
+    ui_router_go(SCR_BRIGHTNESS_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
 }
 
 static void row_relink_cb(lv_event_t *e)
@@ -240,10 +265,10 @@ static void create(lv_obj_t *scr, void *arg)
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
     make_row(s_list, "Scale",         row_scale_cb,         &s_val_scale);
     make_row(s_list, "Units",         row_units_cb,         &s_val_units);
+    make_row(s_list, "Temp until",    row_sched_follow_cb,  &s_val_sched_follow);
     make_row(s_list, "Rotation",      row_rotation_cb,      &s_val_rotation);
     make_row(s_list, "Haptics",       row_haptics_cb,       &s_val_haptics);
-    make_row(s_list, "Day brightness",   row_bri_day_cb,   &s_val_bri_day);
-    make_row(s_list, "Night brightness", row_bri_night_cb, &s_val_bri_night);
+    make_row(s_list, "Brightness",    row_brightness_cb,    NULL);
     make_row(s_list, "Re-link Orion", row_relink_cb,        &s_val_confirm[CONFIRM_RELINK]);
     make_row(s_list, "Factory reset", row_factory_reset_cb, &s_val_confirm[CONFIRM_FACTORY]);
 
@@ -277,8 +302,7 @@ static void destroy(void)
     if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
     s_list = NULL;
     s_title_lbl = NULL;
-    s_val_scale = s_val_units = s_val_haptics = s_val_rotation = NULL;
-    s_val_bri_day = s_val_bri_night = NULL;
+    s_val_scale = s_val_units = s_val_sched_follow = s_val_haptics = s_val_rotation = NULL;
     for (int i = 0; i < CONFIRM_COUNT; i++) s_val_confirm[i] = NULL;
     s_armed = CONFIRM_COUNT;
 }
@@ -298,20 +322,18 @@ static void on_state(const app_state_t *st)
         lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C (water)" : "\xC2\xB0" "F (water)");
     else
         lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
-    lv_label_set_text(s_val_haptics, st->haptics_enabled ? "On" : "Off");
-
-    // Plain read of the last-committed value — SCR_BRIGHTNESS owns the live
-    // preview and the actual commit; this row just mirrors app_state_t.
-    char buf[8];
-    snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_day_pct);
-    lv_label_set_text(s_val_bri_day, buf);
-    snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_night_pct);
-    lv_label_set_text(s_val_bri_night, buf);
+    lv_label_set_text(s_val_sched_follow, st->sched_follow ? "Next step" : "Morning");
+    // Indexed directly by the stored value (see app_state_t.haptics_level):
+    // 0=Off, 1=Auto, 2=Low, 3=High.
+    static const char *HAPTICS_TXT[] = { "Off", "Auto", "Low", "High" };
+    lv_label_set_text(s_val_haptics,
+        HAPTICS_TXT[st->haptics_level <= HAPTIC_LEVEL_HIGH ? st->haptics_level : HAPTIC_LEVEL_AUTO]);
 }
 
 // The knob walks the focused row (one per detent, dial_list's rotor snap) —
 // nothing on this screen is itself an adjustable control anymore (brightness
-// moved to its own full-screen SCR_BRIGHTNESS picker).
+// lives behind its own Brightness submenu -> full-screen SCR_BRIGHTNESS
+// picker).
 static bool on_knob(int detents)
 {
     if (!s_list || detents == 0) return false;

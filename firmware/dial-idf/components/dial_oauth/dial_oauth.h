@@ -36,6 +36,17 @@ bool dial_oauth_ensure_client(const oauth_disc_t *disc, const char *redirect_uri
 // True if a non-expired access token is stored in NVS.
 bool dial_oauth_have_valid_access(void);
 
+// The redirect_uri this device's cached client_id was REGISTERED with, or
+// false when no client is cached yet. Callers that would otherwise present a
+// different redirect_uri (e.g. after switching from a DHCP-IP URI to an mDNS
+// hostname) must keep using this one while tokens exist: dynamic client
+// registration is per-redirect_uri, so a changed URI mints a NEW client_id
+// and the stored refresh token — issued to the OLD one — is rejected with
+// invalid_grant "Client ID mismatch", forcing the user through the QR flow
+// again. Only a device with no client (or one that has already been
+// re-linked) should adopt a new form.
+bool dial_oauth_cached_redirect(char *dst, size_t sz);
+
 // Copy the stored access token. Returns false if none.
 bool dial_oauth_access_token(char *out, size_t sz);
 

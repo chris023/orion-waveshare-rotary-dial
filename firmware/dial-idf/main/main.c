@@ -36,6 +36,7 @@
 #include "dial_palette.h"
 #include "dial_ota.h"
 #include "bidi_switch_knob.h"
+#include "mdns.h"
 // secrets.h is an optional dev convenience (git-ignored) that pre-seeds Wi-Fi
 // creds so a developer build skips on-device provisioning; a fresh clone has
 // none, and WIFI_SSID falls back to dial_net_seed's own placeholder string so
@@ -158,7 +159,7 @@ static void knob_init(void)
 static screen_id_t nav_policy(const app_state_t *st, void **arg)
 {
     // OTA install takeover (M6 UX hardening): once the confirmed install on
-    // SCR_ABOUT actually starts pulling bytes, lock the user onto a
+    // SCR_UPDATE actually starts pulling bytes, lock the user onto a
     // dedicated full-screen progress ring until the device reboots (success
     // — dial_ota_download_and_apply()'s esp_restart() never returns, so this
     // never even gets a chance to route away) or the install fails. Checked
@@ -172,9 +173,10 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
     // Status moved off the takeover's two states while we were still showing
     // it — only OTA_FAILED does this in practice (the stale-tap guard on
     // CMD_OTA_APPLY keeps a race from reaching here any other way). Back to
-    // About, where the stacked error line under the row says why.
+    // Update (M7: moved off scr_about.c), where the stacked error line under
+    // the row says why.
     if (ui_router_current() == SCR_UPDATING)
-        return SCR_ABOUT;
+        return SCR_UPDATE;
 
     // Onboarding (M4): a genuinely fresh device (no Wi-Fi creds at boot; see
     // app_main) parks on the welcome splash through the earliest connection
@@ -225,20 +227,25 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
             // no-op in ui_router_go (same id + same arg), so this is safe
             // every tick.
             screen_id_t cur = ui_router_current();
-            // The menu face and its passive sub-screens (TONIGHT/WIFI/ABOUT)
-            // are reached by swipe/tap and join the sticky set below, but
-            // unlike QUICK/BOOST/SETTINGS (which only leave via a deliberate
-            // user action) they're also dismissed by the standby idle
-            // timeout — someone can swipe there and fall asleep on it — so
-            // that check must win over stickiness, checked BEFORE folding
-            // them into the sticky-set return.
+            // The menu face and its passive sub-screens (TONIGHT/WIFI/ABOUT/
+            // UPDATE) are reached by swipe/tap and join the sticky set
+            // below, but unlike QUICK/BOOST/SETTINGS/BRIGHTNESS_MENU (which
+            // only leave via a deliberate user action) they're also
+            // dismissed by the standby idle timeout — someone can swipe
+            // there and fall asleep on it — so that check must win over
+            // stickiness, checked BEFORE folding them into the sticky-set
+            // return. UPDATE joined this set at M7 (moved off ABOUT, which
+            // was already here) — it's the one sub-screen where getting
+            // yanked away mid-check/mid-confirm by a routine poll commit
+            // would be user-visibly broken, not just an inconvenience.
             bool passive = cur == SCR_MENU || cur == SCR_TONIGHT ||
-                           cur == SCR_WIFI || cur == SCR_ABOUT;
+                           cur == SCR_WIFI || cur == SCR_ABOUT || cur == SCR_UPDATE;
             if (passive && dial_power_level() == DPWR_STANDBY) {
                 *arg = (void *)(uintptr_t)st->ui_zone;
                 return SCR_STANDBY;
             }
-            if (passive || cur == SCR_QUICK || cur == SCR_BOOST || cur == SCR_SETTINGS) return cur;
+            if (passive || cur == SCR_QUICK || cur == SCR_BOOST || cur == SCR_SETTINGS ||
+                cur == SCR_BRIGHTNESS_MENU) return cur;
             // First link on a fresh device: pick a default side before showing
             // the dial (SCR_SIDEPICK). Nothing to pick on a single-zone topper,
             // so that device goes straight to its one face. The `cur` half of
@@ -259,7 +266,8 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         {
             screen_id_t cur = ui_router_current();
             if (cur == SCR_MENU || cur == SCR_SETTINGS || cur == SCR_ABOUT ||
-                cur == SCR_WIFI || cur == SCR_TONIGHT || cur == SCR_BRIGHTNESS)
+                cur == SCR_WIFI || cur == SCR_TONIGHT || cur == SCR_BRIGHTNESS ||
+                cur == SCR_BRIGHTNESS_MENU || cur == SCR_UPDATE)
                 return cur;
         }
         return st->phase == PH_READY ? SCR_CONNECTING : SCR_ERROR;
@@ -306,6 +314,11 @@ static void mut_device_state(app_state_t *st, void *arg)
         st->zones[z].sched_wakeup_temp_c        = keep.sched_wakeup_temp_c;
         st->zones[z].sched_override_available   = keep.sched_override_available;
         st->zones[z].sched_override_applied     = keep.sched_override_applied;
+        st->zones[z].sched_smart_temp_active    = keep.sched_smart_temp_active;
+        st->zones[z].sched_phase1_offset_min    = keep.sched_phase1_offset_min;
+        st->zones[z].sched_phase1_temp_c        = keep.sched_phase1_temp_c;
+        st->zones[z].sched_phase2_offset_min    = keep.sched_phase2_offset_min;
+        st->zones[z].sched_phase2_temp_c        = keep.sched_phase2_temp_c;
 
         if (predates_input) {                       // see the note above
             st->zones[z].on     = keep.on;
@@ -440,6 +453,13 @@ typedef struct {
     float wakeup_temp_c;
     bool  override_available;
     bool  override_applied;
+    // Smart-temperature phase fields — see zone_state_t's comment in
+    // dial_state.h for what these mean.
+    bool  smart_temp_active;
+    int   phase1_offset_min;
+    float phase1_temp_c;
+    int   phase2_offset_min;
+    float phase2_temp_c;
 } sched_zone_t;
 typedef struct { sched_zone_t zones[ZONE_COUNT]; } sched_snapshot_t;
 
@@ -455,12 +475,92 @@ static void mut_schedules(app_state_t *st, void *arg)
         st->zones[z].sched_wakeup_temp_c        = s->zones[z].wakeup_temp_c;
         st->zones[z].sched_override_available   = s->zones[z].override_available;
         st->zones[z].sched_override_applied     = s->zones[z].override_applied;
+        st->zones[z].sched_smart_temp_active    = s->zones[z].smart_temp_active;
+        st->zones[z].sched_phase1_offset_min    = s->zones[z].phase1_offset_min;
+        st->zones[z].sched_phase1_temp_c        = s->zones[z].phase1_temp_c;
+        st->zones[z].sched_phase2_offset_min    = s->zones[z].phase2_offset_min;
+        st->zones[z].sched_phase2_temp_c        = s->zones[z].phase2_temp_c;
+    }
+}
+
+/*
+ * "Dial adjusts" (Follow schedule vs. Hold tonight): which segment of
+ * tonight's sleep schedule is active RIGHT NOW, so a knob turn during that
+ * segment can retarget just that segment's temp field via
+ * override_sleep_schedule_tonight instead of blindly holding for the rest of
+ * the night (see orion_set_temp below). Schedule markers, in order from
+ * bedtime: bedtime -> bedtime+phase_1_offset -> bedtime+phase_2_offset ->
+ * wakeup; each marker's temp field governs from itself up to the next one.
+ * wakeup's own temp is treated as active for a grace window after the wake
+ * clock time too (SLEEP_PHASE_WAKE_GRACE_MIN, the same +30min slop the
+ * steady-state loop below already uses to call the palette/haptics window
+ * "still nighttime") — someone who turns the dial in the few minutes after
+ * their alarm is still adjusting tonight's session, not starting a fresh
+ * daytime hold. Past that grace, or before bedtime, this is SLEEP_PHASE_NONE
+ * ("outside the sleep window") and the caller must fall back to a plain hold.
+ *
+ * All arithmetic is done in minutes-SINCE-BEDTIME on a rolling 24h wheel, not
+ * raw clock minutes, so a boundary crossing midnight — bedtime 21:30 -> wake
+ * 08:00 is the normal case, and a phase offset can independently push its own
+ * boundary past midnight too — is not a special case: every boundary just
+ * wraps the same way.
+ */
+typedef enum {
+    SLEEP_PHASE_NONE = 0,   // outside tonight's sleep window, or schedule unusable
+    SLEEP_PHASE_BEDTIME,
+    SLEEP_PHASE_1,
+    SLEEP_PHASE_2,
+    SLEEP_PHASE_WAKEUP,
+} sleep_phase_t;
+
+#define SLEEP_PHASE_WAKE_GRACE_MIN 30
+
+static sleep_phase_t sleep_phase_now(const zone_state_t *z, int now_min)
+{
+    if (!z->sched_valid || !z->sched_smart_temp_active) return SLEEP_PHASE_NONE;
+    int bed_min, wake_min;
+    if (!dial_parse_hhmm(z->sched_bedtime, &bed_min)) return SLEEP_PHASE_NONE;
+    if (!dial_parse_hhmm(z->sched_wakeup, &wake_min))  return SLEEP_PHASE_NONE;
+
+    int since      = ((now_min  - bed_min) % 1440 + 1440) % 1440;   // now,     minutes-since-bedtime
+    int wake_since = ((wake_min - bed_min) % 1440 + 1440) % 1440;   // wakeup,  minutes-since-bedtime
+    if (wake_since == 0) wake_since = 1440;   // wakeup == bedtime clock time: a full 24h window, not zero-length
+
+    // Clamp the offsets so a bad/duplicate/overrunning value from the API can
+    // never order phase_2 before phase_1 or push either past the window it
+    // lives in — worst case a clamped offset just collapses that phase to
+    // zero width rather than misreporting which one is active.
+    int p1 = z->sched_phase1_offset_min < 0 ? 0 : z->sched_phase1_offset_min;
+    int p2 = z->sched_phase2_offset_min < p1 ? p1 : z->sched_phase2_offset_min;
+    if (p1 > wake_since) p1 = wake_since;
+    if (p2 > wake_since) p2 = wake_since;
+
+    if (since < p1)          return SLEEP_PHASE_BEDTIME;
+    if (since < p2)          return SLEEP_PHASE_1;
+    if (since < wake_since)  return SLEEP_PHASE_2;
+    if (since < wake_since + SLEEP_PHASE_WAKE_GRACE_MIN) return SLEEP_PHASE_WAKEUP;
+    return SLEEP_PHASE_NONE;
+}
+
+// The exact get_sleep_schedules/override_sleep_schedule_tonight field name
+// for a phase's temp — the ONLY field an override write may carry (see
+// orion_set_temp below): sending bedtime/wakeup alongside it would silently
+// move the schedule's clock times too.
+static const char *sleep_phase_field(sleep_phase_t p)
+{
+    switch (p) {
+    case SLEEP_PHASE_BEDTIME: return "bedtime_temp";
+    case SLEEP_PHASE_1:       return "phase_1_temp";
+    case SLEEP_PHASE_2:       return "phase_2_temp";
+    case SLEEP_PHASE_WAKEUP:  return "wakeup_temp";
+    default:                  return NULL;
     }
 }
 
 static void mut_oauth_url(app_state_t *st, void *arg) { strlcpy(st->oauth_url, arg, sizeof(st->oauth_url)); }
 static void mut_retry_in(app_state_t *st, void *arg)  { st->retry_in_s = *(int *)arg; }
 static void mut_ap_ssid(app_state_t *st, void *arg)   { strlcpy(st->ap_ssid, arg, sizeof(st->ap_ssid)); }
+static void mut_sta_ssid(app_state_t *st, void *arg)  { strlcpy(st->sta_ssid, arg, sizeof(st->sta_ssid)); }
 static void mut_clock_valid(app_state_t *st, void *arg) { st->clock_valid = *(bool *)arg; }
 static void mut_fresh_device(app_state_t *st, void *arg) { st->fresh_device = *(bool *)arg; }
 
@@ -694,6 +794,68 @@ static bool orion_set_zone(zone_idx_t zone, const char *field_json)
     if (!ok) ESP_LOGW(TAG, "set_zone %s failed: %s", field_json, dial_mcp_last_error());
     free(r);
     return ok;
+}
+
+// "Dial adjusts": which sleep-schedule phase (if any) a temp write for `zone`
+// should retarget right now. Every precondition must hold, or this returns
+// SLEEP_PHASE_NONE (the caller then falls back to a plain hold) — see the
+// worked list of preconditions in orion_set_temp's own comment below. Reads
+// s_zone_uuid (worker-side zone->uuid map, populated in orion_discover_device)
+// because override_sleep_schedule_tonight targets a specific Orion user_id —
+// with no captured uuid for this zone there is nothing safe to target.
+static sleep_phase_t temp_write_phase(const app_state_t *st, zone_idx_t zone)
+{
+    if (!st->sched_follow) return SLEEP_PHASE_NONE;
+    if (!s_zone_uuid[zone][0]) return SLEEP_PHASE_NONE;
+    struct tm lt;
+    if (!dial_time_now(&lt)) return SLEEP_PHASE_NONE;   // no real wall clock yet -- don't guess
+    return sleep_phase_now(&st->zones[zone], lt.tm_hour * 60 + lt.tm_min);
+}
+
+typedef struct {
+    zone_idx_t zone;
+    float      temp_c;
+    bool       used_override;   // OUT: true if this write went the schedule-override route
+} set_temp_args_t;
+
+// The temp write behind a knob turn / SCR_DIAL edit ("Dial adjusts", M8).
+// Follow schedule: if temp_write_phase() finds a phase actually active right
+// now, retarget ONLY that phase's own temp field via
+// override_sleep_schedule_tonight (never bedtime/wakeup times, never the
+// other phase's temp — sending more than the one field would silently move
+// the rest of the schedule too) — this leaves the schedule engine in control
+// of tonight's later phases, matching the Orion app. Hold tonight, no usable
+// schedule, smart-temp off, outside the window, or no captured uuid — any of
+// those makes temp_write_phase return NONE — falls straight to the plain
+// set_zone hold, unchanged from pre-M8 behavior. And if the override call
+// itself fails for any reason, this still falls back to set_zone rather than
+// silently dropping the write: a missed override is a minor annoyance, but a
+// dropped knob turn (or a wrong-field write at 3am) is not.
+static bool orion_set_temp(void *arg)
+{
+    set_temp_args_t *a = arg;
+    a->used_override = false;
+
+    app_state_t st;
+    dial_state_get(&st);
+    const char *field = sleep_phase_field(temp_write_phase(&st, a->zone));
+
+    if (field) {
+        char args[160];
+        snprintf(args, sizeof(args), "{\"user_id\":\"%s\",\"fields\":{\"%s\":%.1f}}",
+                 s_zone_uuid[a->zone], field, a->temp_c);
+        char *r = NULL;
+        bool ok = dial_mcp_call_tool("override_sleep_schedule_tonight", args, &r);
+        free(r);
+        if (ok) { a->used_override = true; return true; }
+        ESP_LOGW(TAG, "override_sleep_schedule_tonight (%s) failed, falling back to set_zone: %s",
+                 field, dial_mcp_last_error());
+        // fall through to the plain hold below
+    }
+
+    char f[32];
+    snprintf(f, sizeof(f), "\"temp\":%.1f", a->temp_c);
+    return orion_set_zone(a->zone, f);
 }
 
 // Commits the start/cancel_thermal_relief response via mut_relief_ack (an
@@ -940,6 +1102,18 @@ static bool orion_refresh_schedules(void)
                 if (cJSON_IsNumber(wkt)) zs->wakeup_temp_c = (float)wkt->valuedouble;
                 zs->override_available = cJSON_IsTrue(cJSON_GetObjectItem(entry, "is_override_available"));
                 zs->override_applied   = cJSON_IsTrue(cJSON_GetObjectItem(entry, "is_override_applied"));
+
+                // "Dial adjusts" (M8) phase fields — see sleep_phase_now()'s
+                // comment above for what these mean.
+                zs->smart_temp_active = cJSON_IsTrue(cJSON_GetObjectItem(entry, "is_smart_temperature_active"));
+                cJSON *p1o = cJSON_GetObjectItem(entry, "phase_1_offset_minutes");
+                cJSON *p1t = cJSON_GetObjectItem(entry, "phase_1_temp");
+                cJSON *p2o = cJSON_GetObjectItem(entry, "phase_2_offset_minutes");
+                cJSON *p2t = cJSON_GetObjectItem(entry, "phase_2_temp");
+                if (cJSON_IsNumber(p1o)) zs->phase1_offset_min = (int)p1o->valuedouble;
+                if (cJSON_IsNumber(p1t)) zs->phase1_temp_c     = (float)p1t->valuedouble;
+                if (cJSON_IsNumber(p2o)) zs->phase2_offset_min = (int)p2o->valuedouble;
+                if (cJSON_IsNumber(p2t)) zs->phase2_temp_c     = (float)p2t->valuedouble;
                 break;   // one entry per day
             }
         }
@@ -1142,15 +1316,17 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         nvs_flash_erase();
         esp_restart();
         break;
-    // Software update (M6), from Settings' "Software update" row. Gated on
-    // clock_valid the same as the M6 auto-check above (dial_ota_check() is
-    // all HTTPS, and mbedTLS cert validation needs a real wall clock) — but
-    // a manual tap is a user waiting on feedback, not a background sweep, so
-    // a blocked check must say why rather than silently doing nothing.
+    // Software update (M6/M7), from SCR_UPDATE's "Check for updates" row.
+    // Gated on clock_valid the same as the M6 auto-check above
+    // (dial_ota_check() is all HTTPS, and mbedTLS cert validation needs a
+    // real wall clock) — but a manual tap is a user waiting on feedback,
+    // not a background sweep, so a blocked check must say why rather than
+    // silently doing nothing. st.beta selects the channel (M7) — see
+    // dial_ota_check()'s own doc comment.
     case CMD_OTA_CHECK: {
         app_state_t st;
         dial_state_get(&st);
-        if (st.clock_valid) dial_ota_check();
+        if (st.clock_valid) dial_ota_check(st.beta);
         else dial_ota_set_blocked("waiting for time sync - try again shortly");
         commit_ota_snapshot();
         break;
@@ -1183,6 +1359,43 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
     }
 }
 
+/* ---- mDNS ---------------------------------------------------------------
+ * A stable orion-dial-xxxxxx.local hostname stands in for the DHCP IP in the
+ * OAuth redirect_uri below. An IP-based redirect_uri silently invalidates the
+ * registered OAuth client the moment the router hands out a new lease — the
+ * DCR client_id is registered per redirect_uri, so a changed IP meant a
+ * changed URI, which meant dial_oauth_ensure_client's cache-compare (below)
+ * quietly re-registered a NEW client and orphaned the one the user had
+ * already consented to, forcing them back through the QR flow. This bit the
+ * owner repeatedly. mDNS names don't change with the lease, so once
+ * registered this class of forced re-link can't happen again.
+ *
+ * Phones resolve ".local" out of the box — Bonjour on iOS/macOS, NSD on
+ * Android — with no app install, which is exactly what's on hand to scan the
+ * on-screen QR, so it's the right redirect host for this flow.
+ */
+static bool s_mdns_ok;
+
+// Registered once, right after Wi-Fi comes up and BEFORE the OAuth callback
+// server (dial_oauth_start_authorize, which the redirect_uri built below
+// points at) ever starts — see worker_task's call site. If registration
+// itself fails (some networks block/filter multicast), s_mdns_ok stays false
+// and every redirect_uri build below falls back to the old IP-based form, so
+// a network like that can still onboard, just without this fix.
+static void mdns_bringup(void)
+{
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mdns_init failed (%s) -- OAuth redirect_uri will fall back to the DHCP IP",
+                 esp_err_to_name(err));
+        return;
+    }
+    mdns_hostname_set(dial_net_hostname());
+    mdns_instance_name_set("Orion Dial");
+    s_mdns_ok = true;
+    ESP_LOGI(TAG, "mDNS up: %s.local", dial_net_hostname());
+}
+
 static void worker_task(void *arg)
 {
     (void)arg;
@@ -1210,17 +1423,24 @@ static void worker_task(void *arg)
     dial_haptics_init();
     {
         // Apply the persisted haptics preference (restored into the store at
-        // boot) — the driver defaults to enabled and settings only writes on
-        // taps, so without this an "Off" preference reverts every reboot.
+        // boot) — the driver defaults to Auto and settings only writes on
+        // taps, so without this an Off/Low/High preference reverts every reboot.
         app_state_t st;
         dial_state_get(&st);
-        dial_haptics_set_enabled(st.haptics_enabled);
+        dial_haptics_set_level((haptic_level_t)st.haptics_level);
     }
 
     // ---- Wi-Fi (blocking bringup; portal phase published via events) ----
     dial_state_set_phase(PH_WIFI_CONNECTING, NULL);
     dial_net_bringup();
+    // Bringup only returns once connected, so this is the home network's real
+    // name -- SCR_OAUTH_QR names it explicitly (the callback that finishes
+    // linking is a LAN redirect to the dial; a phone on cellular or a guest
+    // network can never deliver it, and that trap has already cost a real
+    // debugging session -- see the QR screen's own comment).
+    dial_state_commit(mut_sta_ssid, (void *)dial_net_sta_ssid());
     dial_time_start();
+    mdns_bringup();   // BEFORE the OAuth callback server (below) ever starts
 
     // ---- OAuth + MCP with retry/backoff on every step ----
     for (;;) {
@@ -1231,7 +1451,23 @@ static void worker_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
-        snprintf(redirect_uri, sizeof(redirect_uri), "http://%s/callback", ip);
+        // An ALREADY-LINKED device keeps whatever redirect_uri its client was
+        // registered with, even the old DHCP-IP form. Registration is
+        // per-redirect_uri, so adopting the new hostname here would mint a
+        // fresh client_id and strand the stored refresh token ("Client ID
+        // mismatch"), forcing every updating user through the QR flow — a
+        // fleet-wide re-link as the price of a fix they didn't ask for.
+        // Only an unlinked device (fresh, factory-reset, or already
+        // re-linking) adopts the mDNS hostname. Everyone else migrates for
+        // free the next time they re-link for their own reasons.
+        if (!dial_oauth_cached_redirect(redirect_uri, sizeof(redirect_uri))) {
+            // Stable hostname when mDNS came up; the DHCP IP (documented
+            // fallback) only when it didn't — see mdns_bringup()'s comment.
+            if (s_mdns_ok)
+                snprintf(redirect_uri, sizeof(redirect_uri), "http://%s.local/callback", dial_net_hostname());
+            else
+                snprintf(redirect_uri, sizeof(redirect_uri), "http://%s/callback", ip);
+        }
 
         if (!dial_oauth_discover(&disc) ||
             !dial_oauth_ensure_client(&disc, redirect_uri, client_id, sizeof(client_id))) {
@@ -1385,11 +1621,23 @@ static void worker_task(void *arg)
                 }
                 if (last_temp[z] >= 0) {
                     zone_temp_t up = { z, dial_f_to_c(last_temp[z]), issued_us };
-                    char f[24];
-                    snprintf(f, sizeof(f), "\"temp\":%.1f", up.temp_c);
-                    set_zone_args_t sa = { (zone_idx_t)z, f };
-                    if (with_auth_retry(set_zone_call, &sa, &disc, client_id))
+                    // "Dial adjusts" (M8): orion_set_temp decides Follow-
+                    // schedule-override vs. plain hold per zone/time; see its
+                    // own comment. mut_zone_temp applies either way (the
+                    // device now holds this target regardless of which write
+                    // path got it there), so the UI reflects the new setpoint
+                    // immediately exactly like it did pre-M8. On a successful
+                    // override, also refresh schedules right away (same
+                    // pattern CMD_TONIGHT_OVERRIDE already uses below) so the
+                    // overridden phase's own temp field and override_applied
+                    // are correct on the very next read, not just after the
+                    // next ~30min periodic refresh.
+                    set_temp_args_t sa = { (zone_idx_t)z, up.temp_c, false };
+                    if (with_auth_retry(orion_set_temp, &sa, &disc, client_id)) {
                         dial_state_commit(mut_zone_temp, &up);
+                        if (sa.used_override)
+                            with_auth_retry(sched_call, NULL, &disc, client_id);
+                    }
                 }
             }
             if (have_pending) handle_immediate_cmd(&pending, &disc, client_id);
@@ -1509,7 +1757,7 @@ static void worker_task(void *arg)
             bool relief_any = ota_st.zones[ZONE_A].relief_active ||
                                ota_st.zones[ZONE_B].relief_active;
             if (in_window && !relief_any && ota_st.phase == PH_READY) {
-                dial_ota_check();
+                dial_ota_check(ota_st.beta);
                 commit_ota_snapshot();
                 last_ota_check_us = esp_timer_get_time();
             }

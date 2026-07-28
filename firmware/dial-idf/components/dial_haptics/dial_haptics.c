@@ -27,6 +27,16 @@ static const char *TAG = "haptics";
 #define MODE_INTERNAL_TRIGGER 0x00
 #define MODE_AUTO_CAL         0x07
 
+// REG_OD_CLAMP scales the overdrive-voltage ceiling (DRV2605 datasheet
+// §8.6.3) -- the actual LRA drive amplitude, independent of which waveform
+// plays. FIRM is today's conservative-drive default, unchanged. SOFT is
+// ~65% of it (0x59 = 89, vs 0x89 = 137) -- inside the 60-70% the level was
+// specced to land in, paired with FX[].night for a profile that's audibly
+// and tactilely softer, not just quieter-feeling because of the effect
+// choice alone.
+#define REG_OD_CLAMP_FIRM 0x89
+#define REG_OD_CLAMP_SOFT 0x59
+
 /*
  * LRA effect selection (library 6). Two variants per effect: day, and a
  * lighter night set so a 2am adjustment doesn't buzz the nightstand.
@@ -43,7 +53,7 @@ static const fx_pair_t FX[] = {
 static QueueHandle_t  s_q;
 static bool           s_present;
 static volatile bool  s_night;
-static volatile bool  s_enabled = true;
+static volatile haptic_level_t s_level = HAPTIC_LEVEL_AUTO;   // matches dial_state's own default
 
 static bool wr(uint8_t reg, uint8_t val)
 {
@@ -53,6 +63,36 @@ static bool wr(uint8_t reg, uint8_t val)
 static bool rd(uint8_t reg, uint8_t *val)
 {
     return i2c_read_buff(drv2605_dev_handle, reg, val, 1) == 0;
+}
+
+// Two profiles, FIRM and SOFT (effect variant + overdrive clamp travel
+// together, always): LOW is SOFT unconditionally, HIGH is FIRM
+// unconditionally (both are the user's explicit, time-of-day-independent
+// choice — HIGH really does mean firm at 3am if that's what they picked),
+// and AUTO is the adaptive one, following `night` (dial_power's sleep-
+// window flag, via dial_haptics_set_night()).
+static inline bool is_soft(haptic_level_t level, bool night)
+{
+    switch (level) {
+    case HAPTIC_LEVEL_LOW:  return true;
+    case HAPTIC_LEVEL_HIGH: return false;
+    case HAPTIC_LEVEL_AUTO:
+    default:                return night;
+    }
+}
+
+// Rewrites REG_OD_CLAMP for the current level+night combination. A plain
+// register write -- the chip stays in MODE_INTERNAL_TRIGGER throughout, so
+// this never touches (let alone re-runs) auto-calibration, which is audible
+// and whose results live in NVS (cal_load/cal_store below), untouched by
+// the level. Called from dial_haptics_set_level (every level change) and
+// dial_haptics_set_night (every actual day/night transition — see
+// dial_power_set_night's early-return, so this isn't a per-tick cost); in
+// LOW/HIGH the write it issues is simply the same value already there.
+static void apply_od_clamp(void)
+{
+    if (!s_present) return;
+    wr(REG_OD_CLAMP, is_soft(s_level, s_night) ? REG_OD_CLAMP_SOFT : REG_OD_CLAMP_FIRM);
 }
 
 // Auto-calibration results persist in NVS so we run the (audible) cal once.
@@ -95,7 +135,14 @@ static bool chip_setup(void)
     wr(REG_LIBRARY, 6);                        // LRA effect library
     // Closed-loop LRA defaults for a small coin LRA (conservative drive).
     wr(REG_RATED_VOLTAGE, 0x50);
-    wr(REG_OD_CLAMP, 0x89);
+    // s_level/s_night are their static defaults (AUTO, day) at this point
+    // unless a caller somehow set them before init runs, which nothing does
+    // today — main.c's real persisted level lands moments later via
+    // dial_haptics_set_level(), which rewrites this same register. Direct
+    // wr(), not apply_od_clamp(): s_present isn't set true until this
+    // function returns (dial_haptics_init assigns it from chip_setup()'s
+    // result), and reaching this line already proves the chip responded.
+    wr(REG_OD_CLAMP, is_soft(s_level, s_night) ? REG_OD_CLAMP_SOFT : REG_OD_CLAMP_FIRM);
 
     uint8_t comp, bemf, cal_fb;
     if (cal_load(&comp, &bemf, &cal_fb)) {
@@ -135,8 +182,10 @@ static void haptics_task(void *arg)
     haptic_effect_t fx;
     for (;;) {
         if (xQueueReceive(s_q, &fx, portMAX_DELAY) != pdTRUE) continue;
-        if (!s_enabled) continue;
-        uint8_t effect = s_night ? FX[fx].night : FX[fx].day;
+        haptic_level_t level = s_level;
+        if (level == HAPTIC_LEVEL_OFF) continue;
+        bool soft = is_soft(level, s_night);
+        uint8_t effect = soft ? FX[fx].night : FX[fx].day;
         // Re-issuing GO restarts the sequencer — a spin never lags the knob.
         wr(REG_WAVESEQ1, effect);
         wr(REG_WAVESEQ2, 0);
@@ -163,5 +212,23 @@ void dial_haptics_play(haptic_effect_t fx)
     xQueueOverwrite(s_q, &fx);
 }
 
-void dial_haptics_set_night(bool night) { s_night = night; }
-void dial_haptics_set_enabled(bool enabled) { s_enabled = enabled; }
+// dial_power's day/night flag. Only AUTO's effect/clamp choice actually
+// depends on it (is_soft()'s AUTO branch) — LOW and HIGH are the user's
+// explicit, global choices and must not be perturbed by the sleep window,
+// so this is a no-op in those two levels beyond rewriting the clamp to the
+// value already there. Still unconditionally stored and still unconditionally
+// forwarded to apply_od_clamp(): dial_power_set_night only calls this on an
+// actual transition (see its own early-return), so there is no per-tick cost
+// to worry about, and keeping this call unconditional means a level change
+// INTO Auto immediately reflects whatever day/night state was already true.
+void dial_haptics_set_night(bool night)
+{
+    s_night = night;
+    apply_od_clamp();
+}
+
+void dial_haptics_set_level(haptic_level_t level)
+{
+    s_level = level;
+    apply_od_clamp();
+}

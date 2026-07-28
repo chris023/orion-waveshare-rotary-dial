@@ -36,6 +36,25 @@ jobs:
           fi
           echo "Tag version $TAG_VERSION matches PROJECT_VER $PROJECT_VER"
 
+      # Beta channel: a tag like dial-v1.1.0-beta.1 publishes as a GitHub
+      # PRERELEASE. That single flag is what keeps the two channels apart —
+      # /releases/latest (what a stable dial polls, and what the flasher's
+      # default manifest serves) excludes prereleases by definition, so only
+      # devices with "Beta builds" on, which read the full releases list,
+      # ever see these.
+      - name: Classify release channel
+        id: channel
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-beta.* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "pages_dir=beta"  >> "$GITHUB_OUTPUT"
+            echo "Channel: BETA (prerelease)"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "pages_dir=latest" >> "$GITHUB_OUTPUT"
+            echo "Channel: STABLE"
+          fi
+
       - name: Build firmware and merge flashable image (firmware/dial-idf)
         uses: espressif/esp-idf-ci-action@v1
         with:
@@ -54,6 +73,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ steps.channel.outputs.prerelease }}
           files: |
             firmware/dial-idf/build/orion-dial.bin
             firmware/dial-idf/build/orion-dial-merged.bin
@@ -70,11 +90,25 @@ jobs:
           name: orion-dial-merged
           path: /tmp/orion-dial-merged
 
+      # Each channel owns its own directory: a beta deploy must never
+      # overwrite the image that the flasher's default (stable) manifest
+      # serves. keep_files below is what preserves the other channel's
+      # directory across deploys.
+      - name: Channel directory
+        id: channel
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-beta.* ]]; then
+            echo "dir=beta" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=latest" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Assemble Pages site
         run: |
-          mkdir -p _site/firmware/latest
-          cp web-flasher/index.html web-flasher/manifest.json _site/
-          cp /tmp/orion-dial-merged/orion-dial-merged.bin _site/firmware/latest/orion-dial-merged.bin
+          mkdir -p _site/firmware/${{ steps.channel.outputs.dir }}
+          cp web-flasher/index.html web-flasher/manifest.json web-flasher/manifest-beta.json _site/
+          cp /tmp/orion-dial-merged/orion-dial-merged.bin \
+             _site/firmware/${{ steps.channel.outputs.dir }}/orion-dial-merged.bin
 
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v4
@@ -82,4 +116,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./_site
           publish_branch: gh-pages
-          force_orphan: true
+          # NOT force_orphan: that wipes the branch on every deploy, which
+          # would delete the OTHER channel's firmware image. keep_files
+          # preserves firmware/latest/ when a beta publishes and vice versa.
+          keep_files: true

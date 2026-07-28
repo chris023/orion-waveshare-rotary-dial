@@ -1,0 +1,368 @@
+/*
+ * SCR_UPDATE — the update sub-screen, reached from SCR_MENU's permanent
+ * "Update" row (owner requirement: "add an update menu item... have it open
+ * a submenu with the beta builds option and a check for updates option --
+ * this is where users will actually confirm they want the OTA"). A single
+ * scrollable list:
+ *
+ *   < Back              -> SCR_MENU
+ *   Check for updates    the OTA control (M6), moved here VERBATIM from
+ *                         scr_about.c: status-driven value label, tap-to-
+ *                         check, tap-twice-to-confirm install. THIS is where
+ *                         the OTA is actually confirmed now -- scr_menu.c's
+ *                         "Update" row is pure navigation, no confirm of its
+ *                         own.
+ *   Beta builds          On/Off toggle (persisted: dial_state's "beta"
+ *                         pref). The worker (main.c) reads it out of its own
+ *                         app_state_t snapshot on every check and passes it
+ *                         to dial_ota_check() -- this screen just flips it.
+ *
+ * No other entry point (no schedule, no zone), so on_state has nothing to
+ * gate on besides its own root pointer -- same shape scr_about.c had before
+ * this file split its OTA control out.
+ */
+#include "ui_screens_internal.h"
+#include "dial_haptics.h"
+#include "dial_list.h"
+#include "dial_ota.h"
+
+#define CY 180
+#define ROW_H             76
+#define CONFIRM_WINDOW_MS 3000
+
+static lv_obj_t *s_title_lbl;
+static lv_obj_t *s_list;
+static lv_obj_t *s_val_ota;         // "Check for updates" row's value label, also the confirm target
+static lv_obj_t *s_ota_err_lbl;     // second line under that row, FAILED only
+static lv_obj_t *s_val_beta;        // "Beta builds" row's On/Off value label
+
+// Confirm-tap state for "Check for updates"' AVAILABLE -> install path --
+// ported verbatim from scr_about.c: same 3s window, same 250ms sweep timer,
+// same single-flag collapse of scr_settings.c's CONFIRM_id table (only one
+// row on this screen can ever need a confirm tap).
+static bool      s_ota_armed;
+static uint32_t  s_armed_at_ms;
+static lv_timer_t *s_confirm_timer;
+
+// Set the instant the confirming (second) tap fires CMD_OTA_APPLY, cleared
+// once app_state's ota.status actually leaves OTA_AVAILABLE. See
+// row_ota_cb/render_ota_row below (ported verbatim from scr_about.c, whose
+// git history has the full field-incident writeup this latch guards
+// against: without it, an unrelated state commit landing in the gap between
+// the confirming tap and the worker draining CMD_OTA_APPLY would repaint
+// this row back to "tap to install", indistinguishable from the confirm
+// never having registered).
+static bool      s_ota_apply_sent;
+
+/* ---- row factory (scr_settings.c's, ported verbatim) --------------------*/
+
+static lv_obj_t *make_row(lv_obj_t *parent, const char *label_txt, lv_event_cb_t cb, lv_obj_t **value_out)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), ROW_H);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_radius(row, 0, 0);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
+    // 36px side insets, not 20: neighbor rows in the rotor rest where the
+    // round panel's chord is narrower, and 20 left their ends cropped.
+    lv_obj_set_style_pad_hor(row, 36, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    if (cb) lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *lbl = lv_label_create(row);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, 0);
+    lv_label_set_text(lbl, label_txt);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t *val = lv_label_create(row);
+    lv_obj_set_style_text_font(val, &lv_font_montserrat_16, 0);
+    lv_label_set_text(val, "");
+    lv_obj_align(val, LV_ALIGN_RIGHT_MID, 0, 0);
+    if (value_out) *value_out = val;
+
+    return row;
+}
+
+/* ---- confirm-tap helper (Check for updates / AVAILABLE only) ------------*/
+
+static void confirm_disarm(void)
+{
+    if (s_ota_armed && s_val_ota) lv_label_set_text(s_val_ota, "");
+    s_ota_armed = false;
+}
+
+// Ticks while the row is armed, so "Tap again to confirm" reverts on its own
+// if the second tap never comes.
+static void confirm_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_ota_armed && lv_tick_elaps(s_armed_at_ms) >= CONFIRM_WINDOW_MS)
+        confirm_disarm();
+}
+
+// True if this tap lands within a prior tap's window (i.e. fire the install now).
+static bool confirm_tap(void)
+{
+    if (s_ota_armed && lv_tick_elaps(s_armed_at_ms) < CONFIRM_WINDOW_MS) {
+        confirm_disarm();
+        return true;
+    }
+    confirm_disarm();
+    s_ota_armed = true;
+    s_armed_at_ms = lv_tick_get();
+    if (s_val_ota) lv_label_set_text(s_val_ota, "Tap again to confirm");
+    return false;
+}
+
+/* ---- row actions ----------------------------------------------------------*/
+
+// Row 0 on every menu sub-screen (see scr_settings.c): the right-swipe still
+// works, but it isn't discoverable on its own.
+static void row_back_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+}
+
+// Check for updates (M6/M7). Behavior depends on the worker's last-known
+// status -- ported verbatim from scr_about.c's row_ota_cb:
+//  - CHECKING/DOWNLOADING: tap is a no-op (screen stays navigable, just not
+//    this row) — nothing to confirm or retry mid-flight.
+//  - AVAILABLE: tap-twice-to-confirm, since this reboots the device. THIS is
+//    the confirmation the owner asked for ("this is where users will
+//    actually confirm they want the OTA") -- scr_menu.c's Update row never
+//    arms anything, it only navigates here.
+//  - IDLE/FAILED/READY_REBOOT: a single tap (re)runs the check — cheap and
+//    non-destructive, so no confirm needed (also how a FAILED row retries).
+static void row_ota_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    switch ((dial_ota_status_t)st.ota.status) {
+    case OTA_CHECKING:
+    case OTA_DOWNLOADING:
+        return;
+    case OTA_AVAILABLE: {
+        // Already confirmed once; the worker just hasn't drained CMD_OTA_APPLY
+        // yet (render_ota_row is holding the optimistic text over this same
+        // gap — see s_ota_apply_sent's comment). Ignore the extra tap rather
+        // than arming a pointless second confirm.
+        if (s_ota_apply_sent) return;
+        if (!confirm_tap()) return;
+        dial_haptics_play(HAPTIC_CONFIRM);
+        s_ota_apply_sent = true;
+        if (s_val_ota) lv_label_set_text(s_val_ota, "Starting install...");
+        app_cmd_t cmd = { .kind = CMD_OTA_APPLY };
+        dial_cmd_post(&cmd);
+        return;
+    }
+    default:   // OTA_IDLE, OTA_FAILED, OTA_READY_REBOOT
+        dial_haptics_play(HAPTIC_TICK);
+        app_cmd_t cmd = { .kind = CMD_OTA_CHECK };
+        dial_cmd_post(&cmd);
+        return;
+    }
+}
+
+// Beta builds toggle. A plain preference flip (like Settings' Scale/Units
+// rows) -- persisting is dial_state_set_beta's job, and the worker picks it
+// up on its own next dial_ota_check() call, so there's nothing else to kick
+// off here.
+static void row_beta_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    dial_haptics_play(HAPTIC_TICK);
+    dial_state_set_beta(!st.beta);
+}
+
+/* ---- palette ---------------------------------------------------------------*/
+
+static void apply_palette(lv_obj_t *scr)
+{
+    const dial_palette_t *pal = PAL();
+    lv_obj_set_style_bg_color(scr, pal->bg, 0);
+    lv_obj_set_style_text_color(s_title_lbl, pal->ink_secondary, 0);
+
+    uint32_t n = lv_obj_get_child_cnt(s_list);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *row = lv_obj_get_child(s_list, i);
+        lv_obj_set_style_border_color(row, pal->track, 0);
+        uint32_t rc = lv_obj_get_child_cnt(row);
+        for (uint32_t j = 0; j < rc; j++) {
+            lv_obj_t *lbl = lv_obj_get_child(row, j);
+            lv_obj_set_style_text_color(lbl, j == 0 ? pal->ink_primary : pal->ink_secondary, 0);
+        }
+    }
+}
+
+// Renders "Check for updates"' value (+ the FAILED-only error line) from the
+// worker-owned app_state_t.ota mirror -- ported verbatim from scr_about.c's
+// render_ota_row, with one deliberate change: OTA_IDLE now reads "Idle"
+// instead of the running firmware version ("v1.0.1") -- that version still
+// lives on scr_about.c's own Firmware row, and repeating it here (under a
+// row now titled "Check for updates" rather than "Software update") was
+// redundant with no screen left that shows both at once.
+//
+// Skipped entirely while a confirm tap is armed: confirm_tap() already wrote
+// "Tap again to confirm" into this label, and a routine state commit landing
+// mid-window (a background poll, say) must not blow that away before the
+// second tap arrives.
+static void render_ota_row(const app_state_t *st)
+{
+    if (!s_val_ota || s_ota_armed) return;
+
+    // Hold "Starting install..." up until the status actually moves off
+    // AVAILABLE (see s_ota_apply_sent's comment) — an unrelated commit
+    // landing before the worker drains CMD_OTA_APPLY must not repaint the
+    // AVAILABLE prompt the user just confirmed away.
+    if (s_ota_apply_sent) {
+        if (st->ota.status == OTA_AVAILABLE) return;
+        s_ota_apply_sent = false;
+    }
+
+    const dial_palette_t *pal = PAL();
+    lv_obj_set_style_text_color(s_val_ota, pal->ink_secondary, 0);
+    if (s_ota_err_lbl) lv_label_set_text(s_ota_err_lbl, "");
+
+    char buf[48];
+    switch ((dial_ota_status_t)st->ota.status) {
+    case OTA_CHECKING:
+        lv_label_set_text(s_val_ota, "Checking...");
+        break;
+    case OTA_AVAILABLE:
+        snprintf(buf, sizeof(buf), "v%s available - tap to install", st->ota.latest);
+        lv_label_set_text(s_val_ota, buf);
+        break;
+    case OTA_DOWNLOADING:
+        snprintf(buf, sizeof(buf), "Downloading %d%%", st->ota.progress_pct);
+        lv_label_set_text(s_val_ota, buf);
+        break;
+    case OTA_READY_REBOOT:
+        lv_label_set_text(s_val_ota, "Restarting...");
+        break;
+    case OTA_FAILED:
+        lv_label_set_text(s_val_ota, "Update failed");
+        lv_obj_set_style_text_color(s_val_ota, pal->warning, 0);
+        if (s_ota_err_lbl) {
+            lv_label_set_text(s_ota_err_lbl, st->ota.err);
+            lv_obj_set_style_text_color(s_ota_err_lbl, pal->warning, 0);
+        }
+        break;
+    case OTA_IDLE:
+    default:
+        lv_label_set_text(s_val_ota, "Idle");
+        break;
+    }
+}
+
+/* ---- vtable ----------------------------------------------------------------*/
+
+static void create(lv_obj_t *scr, void *arg)
+{
+    (void)arg;
+    s_ota_armed = false;
+    s_ota_apply_sent = false;
+    const dial_palette_t *pal = PAL();
+    lv_obj_set_style_bg_color(scr, pal->bg, 0);
+
+    s_list = dial_list_create(scr, ROW_H);
+
+    make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
+
+    // Unlike a plain label+value row, this one carries worker-driven prose
+    // that can run long ("Tap again to confirm", "v1.2.3 available - tap to
+    // install", the ~40-char dial_ota_set_blocked reasons) — too long to sit
+    // beside "Check for updates" on one line without running into it (same
+    // overlap scr_about.c's identical row used to have). So this row alone
+    // drops make_row's label-left/value-right split and stacks three
+    // left-aligned lines instead, each capped to the row's own content width
+    // with LONG_DOT so a pathological string ellipsizes rather than
+    // overlapping anything.
+    lv_obj_t *ota_row = make_row(s_list, "Check for updates", row_ota_cb, &s_val_ota);
+    lv_obj_t *ota_lbl = lv_obj_get_child(ota_row, 0);
+    lv_obj_align(ota_lbl, LV_ALIGN_LEFT_MID, 0, -20);
+
+    lv_obj_set_width(s_val_ota, LV_PCT(100));
+    lv_label_set_long_mode(s_val_ota, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_val_ota, LV_ALIGN_LEFT_MID, 0, 6);
+
+    s_ota_err_lbl = lv_label_create(ota_row);
+    lv_obj_set_style_text_font(s_ota_err_lbl, &lv_font_montserrat_12, 0);
+    lv_label_set_text(s_ota_err_lbl, "");
+    lv_obj_set_width(s_ota_err_lbl, LV_PCT(100));
+    lv_label_set_long_mode(s_ota_err_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_ota_err_lbl, LV_ALIGN_LEFT_MID, 0, 26);
+
+    make_row(s_list, "Beta builds", row_beta_cb, &s_val_beta);
+
+    // Created AFTER the list so it draws over rows scrolling beneath it.
+    s_title_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_title_lbl, &lv_font_montserrat_16, 0);
+    lv_label_set_text(s_title_lbl, "UPDATE");
+    lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 64 - CY);
+
+    apply_palette(scr);
+    dial_list_settle(s_list, 1);   // open on "Check for updates", not on Back
+    s_confirm_timer = lv_timer_create(confirm_timer_cb, 250, NULL);
+}
+
+static void destroy(void)
+{
+    // Backing out of this screen clears a failed check -- moved here from
+    // scr_about.c verbatim (M6 field incident: a "check failed (HTTP -1)"
+    // used to sit around until a power cycle, and leaving the screen is
+    // exactly when a user expects it gone). The worker also ages FAILED out
+    // on its own (see main.c's OTA_FAILED_AUTOCLEAR_US) — this is just the
+    // immediate half of that fix.
+    {
+        app_state_t st;
+        dial_state_get(&st);
+        if ((dial_ota_status_t)st.ota.status == OTA_FAILED) {
+            app_cmd_t cmd = { .kind = CMD_OTA_CLEAR_FAILED };
+            dial_cmd_post(&cmd);
+        }
+    }
+    if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
+    s_title_lbl = NULL;
+    s_list = NULL;
+    s_val_ota = NULL;
+    s_ota_err_lbl = NULL;
+    s_val_beta = NULL;
+    s_ota_armed = false;
+    s_ota_apply_sent = false;
+}
+
+static void on_state(const app_state_t *st)
+{
+    if (!s_list) return;
+    apply_palette(lv_obj_get_parent(s_list));
+    render_ota_row(st);
+    if (s_val_beta) lv_label_set_text(s_val_beta, st->beta ? "On" : "Off");
+}
+
+// The knob walks the focused row (one per detent, dial_list's rotor snap) —
+// nothing on this screen is itself an adjustable control.
+static bool on_knob(int detents)
+{
+    if (!s_list || detents == 0) return false;
+    int r = dial_list_knob(s_list, detents);
+    if (r) dial_haptics_play(r > 0 ? HAPTIC_TICK : HAPTIC_STOP);
+    return true;
+}
+
+static bool on_gesture(lv_dir_t dir)
+{
+    if (dir != LV_DIR_RIGHT) return false;
+    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+    return true;
+}
+
+const ui_screen_t scr_update = {
+    .create = create, .destroy = destroy, .on_state = on_state,
+    .on_knob = on_knob, .on_gesture = on_gesture,
+};

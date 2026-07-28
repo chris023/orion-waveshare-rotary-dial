@@ -113,7 +113,7 @@ static void tap_cb(lv_event_t *e)
 {
     (void)e;
     dial_haptics_play(HAPTIC_CONFIRM);
-    ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_NONE);
+    ui_router_go(SCR_BRIGHTNESS_MENU, NULL, LV_SCR_LOAD_ANIM_NONE);
 }
 
 /* ---- vtable ----------------------------------------------------------------*/
@@ -242,7 +242,7 @@ static bool on_knob(int detents)
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_BOTTOM) return false;
-    ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_NONE);
+    ui_router_go(SCR_BRIGHTNESS_MENU, NULL, LV_SCR_LOAD_ANIM_NONE);
     return true;
 }
 

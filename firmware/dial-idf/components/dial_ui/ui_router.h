@@ -31,9 +31,11 @@ typedef enum {
     SCR_WELCOME,          // fresh-device onboarding splash (M4)
     SCR_SIDEPICK,         // "which side of the bed?" (M4, reused from Settings)
     SCR_SETTINGS,         // settings list (M4, arg: unused/NULL — returns to SCR_MENU)
-    SCR_BRIGHTNESS,       // day/night backlight percent picker (arg: 0=day, 1=night)
+    SCR_BRIGHTNESS_MENU,  // Day/Night brightness submenu (arg: unused/NULL — returns to SCR_SETTINGS)
+    SCR_BRIGHTNESS,       // day/night backlight percent picker (arg: 0=day, 1=night — returns to SCR_BRIGHTNESS_MENU)
     SCR_WIFI,             // Wi-Fi status + change-network (arg: unused/NULL)
-    SCR_ABOUT,            // versions, serial, software update (arg: unused/NULL)
+    SCR_ABOUT,            // versions, serial (read-only; arg: unused/NULL)
+    SCR_UPDATE,           // update submenu: check for updates + beta builds toggle (arg: unused/NULL — returns to SCR_MENU)
     SCR_UPDATING,         // full-screen OTA install takeover (M6, arg: unused/NULL)
     SCR_COUNT,
 } screen_id_t;

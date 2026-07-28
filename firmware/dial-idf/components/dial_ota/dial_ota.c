@@ -22,9 +22,19 @@ static const char *TAG = "ota";
 
 #define GITHUB_API_URL \
     "https://api.github.com/repos/chris023/orion-waveshare-rotary-dial/releases/latest"
+// The LIST endpoint (beta channel only) -- unlike /releases/latest, this
+// includes prereleases. Same host/owner/repo, no trailing "/latest".
+#define GITHUB_API_URL_LIST \
+    "https://api.github.com/repos/chris023/orion-waveshare-rotary-dial/releases"
 #define ASSET_NAME     "orion-dial.bin"
 #define TAG_PREFIX     "dial-v"
 #define CHECK_BUF_CAP  (64 * 1024)   // release JSON is normally ~10-30KB
+// Beta channel only: how many of the list endpoint's (newest-first) entries
+// to inspect before giving up on finding a usable release. Bounds both the
+// JSON walk and the worst case where the newest few entries are all drafts
+// or malformed -- this device has no business scanning its whole release
+// history.
+#define RELEASES_LIST_SCAN_CAP 10
 
 // Guards s_info and s_asset_url. A short spinlock (never held across a
 // blocking call), matching dial_state.c's s_input_mux idiom for cross-task
@@ -77,11 +87,37 @@ static void set_progress(int pct)
     taskEXIT_CRITICAL(&s_mux);
 }
 
-// Simple semver-ish compare: split on dots, numeric compare major/minor/
-// patch. Missing trailing components default to 0 ("1.2" == "1.2.0"). Any
-// component that fails to parse as a number for EITHER string is treated as
-// "not newer" -- an unexpected tag format must never trigger a spurious
-// update.
+// Parses an optional "-beta.N" suffix trailing a major.minor.patch core (the
+// only prerelease form this firmware ships). *has_suffix reports whether one
+// was found at all; *n is its numeral (0 if absent, or if present but
+// unparseable -- a malformed "-beta" with no digits still counts as SOME
+// prerelease for ordering purposes rather than silently acting like a full
+// release, which would let a busted tag skip the channel altogether).
+static void parse_beta_suffix(const char *ver, bool *has_suffix, int *n)
+{
+    const char *p = strstr(ver, "-beta.");
+    *has_suffix = (p != NULL);
+    *n = 0;
+    if (p) sscanf(p + 6, "%d", n);
+}
+
+// Semver-ish compare, prerelease-aware (semver §11): split the major.minor.
+// patch core on dots, numeric compare. Missing trailing components default
+// to 0 ("1.2" == "1.2.0"); %d naturally stops at the first non-digit, so a
+// "-beta.N" suffix on either string doesn't perturb the core parse (this is
+// what lets `current` -- PROJECT_VER, which for a beta build is literally
+// "1.1.0-beta.1" -- flow through the same sscanf as `latest` with no special
+// casing). Any core component that fails to parse as a number for EITHER
+// string is treated as "not newer" -- an unexpected tag format must never
+// trigger a spurious update.
+//
+// Equal cores fall through to the prerelease tiebreak: a build with no
+// "-beta.N" suffix outranks one that has it (a stable release beats any
+// prerelease of the same core version -- this is what lets a device parked
+// on a beta graduate onto the matching stable release automatically, and,
+// the other direction, is why a device already ON stable X.Y.Z never
+// "upgrades" to a beta of that same X.Y.Z even with the beta toggle on).
+// Between two betas of the same core, higher N wins.
 static bool is_newer(const char *latest, const char *current)
 {
     int am = 0, an = 0, ap = 0, bm = 0, bn = 0, bp = 0;
@@ -89,7 +125,15 @@ static bool is_newer(const char *latest, const char *current)
     if (sscanf(current, "%d.%d.%d", &bm, &bn, &bp) < 1) return false;
     if (am != bm) return am > bm;
     if (an != bn) return an > bn;
-    return ap > bp;
+    if (ap != bp) return ap > bp;
+
+    bool a_beta, b_beta;
+    int  a_n, b_n;
+    parse_beta_suffix(latest, &a_beta, &a_n);
+    parse_beta_suffix(current, &b_beta, &b_n);
+    if (a_beta != b_beta) return !a_beta;   // one's a prerelease, the other isn't
+    if (!a_beta) return false;              // both plain, equal core -> not newer
+    return a_n > b_n;
 }
 
 /* ---- version-check HTTP GET -------------------------------------------- */
@@ -118,7 +162,21 @@ static esp_err_t on_check_http(esp_http_client_event_t *e)
     return ESP_OK;
 }
 
-bool dial_ota_check(void)
+// Extracts + TAG_PREFIX-strips a release object's version tag into `out`
+// (sized like dial_ota_info_t.latest). False (leaving *out untouched) if the
+// object has no usable tag_name -- callers treat that as "skip this entry"
+// (list/beta mode) or "malformed release" (single/stable mode).
+static bool release_version(cJSON *rel, char *out, size_t out_sz)
+{
+    cJSON *tag = cJSON_GetObjectItem(rel, "tag_name");
+    if (!cJSON_IsString(tag) || !tag->valuestring) return false;
+    const char *ver = tag->valuestring;
+    if (!strncmp(ver, TAG_PREFIX, strlen(TAG_PREFIX))) ver += strlen(TAG_PREFIX);
+    strlcpy(out, ver, out_sz);
+    return true;
+}
+
+bool dial_ota_check(bool beta)
 {
     set_status(OTA_CHECKING, NULL, NULL);
 
@@ -128,7 +186,7 @@ bool dial_ota_check(void)
 
     check_resp_t r = { 0 };
     esp_http_client_config_t cfg = {
-        .url           = GITHUB_API_URL,
+        .url           = beta ? GITHUB_API_URL_LIST : GITHUB_API_URL,
         .event_handler = on_check_http,
         .user_data     = &r,
         .cert_pem      = dial_oauth_root_ca(),
@@ -164,20 +222,50 @@ bool dial_ota_check(void)
     }
 
     bool ok = false;
-    cJSON *tag = cJSON_GetObjectItem(root, "tag_name");
-    if (!cJSON_IsString(tag) || !tag->valuestring) {
-        set_status(OTA_FAILED, NULL, "no tag_name in release");
-        goto done;
+    // The release object to actually pull tag_name/assets from: /latest's
+    // singular object for the stable channel, or -- beta on -- whichever
+    // entry of the list endpoint carries the newest version among the first
+    // RELEASES_LIST_SCAN_CAP (newest-first) entries. cJSON owns all of
+    // `chosen`'s memory either way (it's a view into `root`), so there is
+    // nothing to free beyond the one cJSON_Delete(root) at the bottom.
+    cJSON *chosen = NULL;
+    char   latest[16];
+
+    if (!beta) {
+        chosen = root;
+        if (!release_version(chosen, latest, sizeof(latest))) {
+            set_status(OTA_FAILED, NULL, "no tag_name in release");
+            goto done;
+        }
+    } else {
+        if (!cJSON_IsArray(root)) {
+            set_status(OTA_FAILED, NULL, "release list JSON not an array");
+            goto done;
+        }
+        char chosen_ver[16] = { 0 };
+        int n = cJSON_GetArraySize(root);
+        if (n > RELEASES_LIST_SCAN_CAP) n = RELEASES_LIST_SCAN_CAP;
+        for (int i = 0; i < n; i++) {
+            cJSON *rel = cJSON_GetArrayItem(root, i);
+            if (!cJSON_IsObject(rel)) continue;
+            if (cJSON_IsTrue(cJSON_GetObjectItem(rel, "draft"))) continue;
+            char ver[16];
+            if (!release_version(rel, ver, sizeof(ver))) continue;
+            if (!chosen || is_newer(ver, chosen_ver)) {
+                chosen = rel;
+                strlcpy(chosen_ver, ver, sizeof(chosen_ver));
+            }
+        }
+        if (!chosen) {
+            set_status(OTA_FAILED, NULL, "no usable release in list");
+            goto done;
+        }
+        strlcpy(latest, chosen_ver, sizeof(latest));
     }
 
     {
-        const char *ver = tag->valuestring;
-        if (!strncmp(ver, TAG_PREFIX, strlen(TAG_PREFIX))) ver += strlen(TAG_PREFIX);
-        char latest[16];
-        strlcpy(latest, ver, sizeof(latest));
-
         char asset_url[sizeof(s_asset_url)] = { 0 };
-        cJSON *assets = cJSON_GetObjectItem(root, "assets");
+        cJSON *assets = cJSON_GetObjectItem(chosen, "assets");
         cJSON *a;
         cJSON_ArrayForEach(a, assets) {
             cJSON *name = cJSON_GetObjectItem(a, "name");

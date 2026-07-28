@@ -1,0 +1,13 @@
+{
+  "name": "Orion Dial (beta)",
+  "version": "beta",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "firmware/beta/orion-dial-merged.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

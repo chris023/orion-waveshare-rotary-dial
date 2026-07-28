@@ -39,3 +39,11 @@ CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 # PEM in dial_oauth instead (see orion_root_ca.pem's own note on why). Drop
 # the compiled-in bundle to reclaim flash.
 # CONFIG_MBEDTLS_CERTIFICATE_BUNDLE is not set
+
+# app_main's task carries the boot-time UI bring-up, and the router copies a
+# ~1.4KB app_state_t snapshot per frame (dispatch + the screen's on_state
+# nest two of them). The 3584-byte default left no headroom: adding two
+# sub-screens in v1.1.0 overflowed it and boot-looped the dial. 6144 restores
+# a real margin; the main task is deleted once app_main returns, so this is
+# transient boot RAM, not a permanent cost.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144

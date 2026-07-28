@@ -19,6 +19,17 @@ static inline uint8_t clamp_bri_pct(uint8_t pct)
     return pct;
 }
 
+// Same defensive style, for the haptics level. Mirrors dial_haptics.h's
+// haptic_level_t (0=Off, 1=Auto, 2=Low, 3=High — see app_state_t.
+// haptics_level's comment). An out-of-range byte (corrupt NVS, or a future
+// firmware's level this build predates) clamps to Auto, not Off: silently
+// going quiet is the wrong failure mode for a physical-feedback preference,
+// and Auto is this pref's own default besides.
+static inline uint8_t clamp_haptics_level(uint8_t level)
+{
+    return (level <= 3) ? level : 1;
+}
+
 static SemaphoreHandle_t s_mux;
 static QueueHandle_t     s_cmd_q;
 static app_state_t       s_state;
@@ -38,11 +49,13 @@ void dial_state_init(void)
     memset(&s_state, 0, sizeof(s_state));
     s_state.phase = PH_BOOT;
     s_state.wifi_join_idx = -1;   // no on-device join attempted yet
-    s_state.haptics_enabled = true;   // matches dial_haptics.c's own default
+    s_state.haptics_level = 1;        // HAPTIC_LEVEL_AUTO — matches dial_haptics.c's own default
     s_state.bri_day_pct   = 100;      // fresh-device default == today's exact
     s_state.bri_night_pct = 100;      // brightness (100% of the existing duty tables)
+    s_state.beta          = false;    // fresh-device default: stable channel only
+    s_state.sched_follow  = true;     // fresh-device default: Follow schedule (owner decision)
     // Fresh-device default: relative scale (owner decision). Seeded here, in
-    // RAM, exactly like haptics_enabled above — restore_prefs opens NVS
+    // RAM, exactly like haptics_level above — restore_prefs opens NVS
     // read-only and early-returns when the "ui" namespace doesn't exist yet
     // (a factory-fresh device), so a default that lived only there would never
     // apply. An upgrading device overrides this back to absolute in
@@ -58,8 +71,10 @@ void dial_state_restore_prefs(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
-    uint8_t zone = 0, units = 0, haptics = 1, rot = 0, relmode = 1;
+    uint8_t zone = 0, units = 0, haptics = 1 /* HAPTIC_LEVEL_AUTO */, rot = 0, relmode = 1;
     uint8_t bri_day = 100, bri_night = 100;
+    uint8_t beta = 0;
+    uint8_t sched_follow = 1;   // matches init's fresh-device default (Follow)
     bool have_zone    = nvs_get_u8(h, "zone", &zone) == ESP_OK && zone < ZONE_COUNT;
     bool have_units   = nvs_get_u8(h, "units", &units) == ESP_OK;
     bool have_haptics = nvs_get_u8(h, "haptics", &haptics) == ESP_OK;
@@ -67,9 +82,11 @@ void dial_state_restore_prefs(void)
     bool have_rel     = nvs_get_u8(h, "relmode", &relmode) == ESP_OK;
     bool have_bri_day   = nvs_get_u8(h, "bri_day", &bri_day) == ESP_OK;
     bool have_bri_night = nvs_get_u8(h, "bri_night", &bri_night) == ESP_OK;
+    bool have_beta      = nvs_get_u8(h, "beta", &beta) == ESP_OK;
+    bool have_sched_follow = nvs_get_u8(h, "sched_follow", &sched_follow) == ESP_OK;
     nvs_close(h);
     if (!have_zone && !have_units && !have_haptics && !have_rot && !have_rel
-        && !have_bri_day && !have_bri_night) return;
+        && !have_bri_day && !have_bri_night && !have_beta && !have_sched_follow) return;
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
     if (have_zone) {
@@ -79,9 +96,15 @@ void dial_state_restore_prefs(void)
         // side_picked existed, so those devices never re-run SCR_SIDEPICK.
         s_state.side_picked = true;
     }
-    if (have_units)   s_state.units_c        = (units != 0);
-    if (have_haptics) s_state.haptics_enabled = (haptics != 0);
-    if (have_rot)     s_state.rotation        = rot;
+    if (have_units)   s_state.units_c      = (units != 0);
+    // No 0/1 -> bool translation needed: the "haptics" key's stored byte
+    // already IS the new haptic_level_t encoding (0=Off, 1=Auto) for every
+    // device that has ever written it — 1 ("on") already meant "the
+    // adaptive day/night behavior" — so a legacy value lands on exactly the
+    // right level with zero migration code. clamp defends only against a
+    // corrupt byte or a future level this build predates.
+    if (have_haptics) s_state.haptics_level = clamp_haptics_level(haptics);
+    if (have_rot)     s_state.rotation      = rot;
     // Temperature scale. If we've ever persisted it, honor it. Otherwise, if
     // this device was set up before this release (has a "zone" key but no
     // "relmode"), keep it on ABSOLUTE — an unattended OTA must not change what
@@ -91,6 +114,8 @@ void dial_state_restore_prefs(void)
     else if (have_zone) s_state.rel_mode = false;
     if (have_bri_day)   s_state.bri_day_pct   = clamp_bri_pct(bri_day);
     if (have_bri_night) s_state.bri_night_pct = clamp_bri_pct(bri_night);
+    if (have_beta)       s_state.beta         = (beta != 0);
+    if (have_sched_follow) s_state.sched_follow = (sched_follow != 0);
     s_state.generation++;
     xSemaphoreGive(s_mux);
 }
@@ -280,16 +305,17 @@ void dial_state_set_rel_mode(bool rel_mode)
     }
 }
 
-void dial_state_set_haptics_enabled(bool enabled)
+void dial_state_set_haptics_level(uint8_t level)
 {
+    level = clamp_haptics_level(level);
     xSemaphoreTake(s_mux, portMAX_DELAY);
-    s_state.haptics_enabled = enabled;
+    s_state.haptics_level = level;
     s_state.generation++;
     xSemaphoreGive(s_mux);
 
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, "haptics", enabled ? 1 : 0);
+        nvs_set_u8(h, "haptics", level);
         nvs_commit(h);
         nvs_close(h);
     }
@@ -342,6 +368,52 @@ void dial_state_set_bri_night_pct(uint8_t pct)
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
         nvs_set_u8(h, "bri_night", pct);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+bool dial_state_get_beta(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    bool v = s_state.beta;
+    xSemaphoreGive(s_mux);
+    return v;
+}
+
+void dial_state_set_beta(bool enabled)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.beta = enabled;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "beta", enabled ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+bool dial_state_get_sched_follow(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    bool v = s_state.sched_follow;
+    xSemaphoreGive(s_mux);
+    return v;
+}
+
+void dial_state_set_sched_follow(bool follow)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.sched_follow = follow;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "sched_follow", follow ? 1 : 0);
         nvs_commit(h);
         nvs_close(h);
     }

@@ -23,7 +23,7 @@
 /* ---- dial_haptics ------------------------------------------------------ */
 
 void dial_haptics_play(haptic_effect_t fx) { (void)fx; }
-void dial_haptics_set_enabled(bool enabled) { (void)enabled; }
+void dial_haptics_set_level(haptic_level_t level) { (void)level; }
 void dial_haptics_set_night(bool night) { (void)night; }
 void dial_haptics_init(void) {}
 
@@ -113,6 +113,6 @@ void dial_net_on_event(dial_net_event_cb_t cb) { (void)cb; }
 
 const esp_app_desc_t *esp_app_get_description(void)
 {
-    static const esp_app_desc_t desc = { .version = "1.0.11", .idf_ver = "v6.0" };
+    static const esp_app_desc_t desc = { .version = "1.1.0", .idf_ver = "v6.0" };
     return &desc;
 }

@@ -320,6 +320,13 @@ void dial_oauth_forget_access(void)
     nvs_close(h);
 }
 
+bool dial_oauth_cached_redirect(char *dst, size_t sz)
+{
+    char cid[96];
+    if (!nvs_get("client_id", cid, sizeof(cid))) return false;   // no client -> nothing to preserve
+    return nvs_get("redirect_uri", dst, sz);
+}
+
 bool dial_oauth_have_valid_access(void)
 {
     // No wall clock yet: presence == usable. Expiry is handled by refreshing on

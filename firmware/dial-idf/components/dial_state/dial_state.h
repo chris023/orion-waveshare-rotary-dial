@@ -156,6 +156,22 @@ typedef struct {
     float sched_wakeup_temp_c;
     bool  sched_override_applied;
     bool  sched_override_available;
+
+    // Smart-temperature phase schedule ("Dial adjusts" / M8), same
+    // get_sleep_schedules entry as the fields above. is_smart_temperature_active
+    // says whether this schedule's phase engine is even on for tonight (if
+    // false, only sched_bedtime_temp_c/sched_wakeup_temp_c above are
+    // meaningful — there's no phase_1/phase_2 step to speak of). The offsets
+    // are MINUTES AFTER BEDTIME (not clock times), so together these mark
+    // tonight's phase boundaries: bedtime -> bedtime+phase_1_offset ->
+    // bedtime+phase_2_offset -> wakeup, with temps bedtime_temp / phase_1_temp
+    // / phase_2_temp / wakeup_temp. See main.c's sleep_phase_now() for how
+    // "which phase is active right now" is resolved from these.
+    bool  sched_smart_temp_active;
+    int   sched_phase1_offset_min;
+    float sched_phase1_temp_c;
+    int   sched_phase2_offset_min;
+    float sched_phase2_temp_c;
 } zone_state_t;
 
 /*
@@ -185,6 +201,12 @@ typedef struct {
     int     retry_in_s;       // seconds until the supervisor's next retry (0 = n/a)
     char    oauth_url[600];   // authorize URL while PH_OAUTH_WAIT_CONSENT
     char    ap_ssid[33];      // SoftAP name while PH_WIFI_PORTAL
+    // The dial's own HOME network SSID (dial_net_sta_ssid() mirror, committed
+    // once worker_task's dial_net_bringup() returns). NOT ap_ssid above --
+    // this is the network SCR_OAUTH_QR tells the user their PHONE must also be
+    // on, since the OAuth callback is a LAN redirect to the dial and cannot
+    // reach it over cellular or a different network. "" if unknown.
+    char    sta_ssid[33];
 
     /*
      * On-device Wi-Fi setup. A rejected password must not throw the user back
@@ -253,9 +275,19 @@ typedef struct {
     // sits on a nightstand and its cable exits one edge, so which way is "up"
     // is a property of the room, not of the device.
     uint8_t rotation;
-    // Haptics master enable, mirrored here so screens can read the current
-    // setting; dial_haptics_set_enabled() is the actual enforcement point.
-    bool haptics_enabled;
+    // Haptics feedback level, mirrored here so screens can read the current
+    // setting; dial_haptics_set_level() is the actual enforcement point.
+    // Mirrors dial_haptics.h's haptic_level_t values field-for-value without
+    // depending on that header (same int-mirror trick as ota.status below):
+    // 0=Off (nothing plays), 1=Auto (FIRM by day, SOFT during the sleep
+    // window — today's pre-M7 "enabled" behavior, unchanged), 2=Low (SOFT
+    // always), 3=High (FIRM always, including at 3am — a deliberate, global
+    // user choice, not time-of-day-gated). The NVS key "haptics" is
+    // unchanged from the old On/Off bool pref — every device in the field
+    // already stores 0 or 1, and 1 already meant "the adaptive behavior", so
+    // it maps to exactly Off/Auto with no migration; 2 (Low) and 3 (High)
+    // are new. See dial_state_set_haptics_level.
+    uint8_t haptics_level;
     // Day/night backlight brightness, 10..100 (percent), 10% steps. dial_power
     // scales its whole duty table (active/dimmed/standby together) by this at
     // apply time; dial_power_start() is what actually enforces it. Defaults to
@@ -263,6 +295,26 @@ typedef struct {
     // see dial_state_get_bri_day_pct/set_bri_day_pct.
     uint8_t bri_day_pct;
     uint8_t bri_night_pct;
+    // Beta OTA channel opt-in (SCR_UPDATE's "Beta builds" toggle), persisted
+    // to NVS "ui"/"beta". dial_state has no business knowing about dial_ota,
+    // so this is just the stored preference -- the worker (main.c) reads it
+    // out of its app_state_t snapshot and passes it to dial_ota_check(),
+    // same division of labor as haptics_level/dial_haptics_set_level.
+    // Default false (stable channel only) both here and in an NVS-absent
+    // restore -- see dial_state_get_beta/dial_state_set_beta.
+    bool beta;
+    // "Dial adjusts" preference: true = Follow schedule (a knob turn during
+    // tonight's active sleep-schedule phase retargets THAT PHASE via
+    // override_sleep_schedule_tonight, leaving the rest of tonight's
+    // schedule in control — matches the Orion phone app); false = Hold
+    // tonight (a knob turn always set_zones a plain hold for the rest of the
+    // night, this dial's original behavior). main.c's worker reads this out
+    // of its app_state_t snapshot the same way it reads beta above — dial_state
+    // has no business knowing about MCP tool calls. Persisted to NVS
+    // "ui"/"sched_follow". Default TRUE (owner decision) both here and in an
+    // NVS-absent restore -- see dial_state_get_sched_follow/
+    // dial_state_set_sched_follow.
+    bool sched_follow;
 
     // --- OTA (M6) ---
     // Mirrors dial_ota_info_t (components/dial_ota/dial_ota.h) field-for-
@@ -356,24 +408,39 @@ void dial_state_set_units_c(bool units_c);
 // Set the temperature-scale preference (relative vs absolute); persists to NVS
 // "ui"/"relmode".
 void dial_state_set_rel_mode(bool rel_mode);
-// Set the haptics-enabled preference; persists to NVS "ui"/"haptics". Does
-// NOT itself call dial_haptics_set_enabled() — dial_state has no business
-// knowing about the haptics driver, so callers do both.
-void dial_state_set_haptics_enabled(bool enabled);
+// Set the haptics feedback level (0=Off/1=High/2=Low — see app_state_t.
+// haptics_level above); persists to NVS "ui"/"haptics" immediately. Does NOT
+// itself call dial_haptics_set_level() — dial_state has no business knowing
+// about the haptics driver, so callers do both. `level` is not typed
+// haptic_level_t: dial_state can't #include dial_haptics.h (leaf component),
+// same reasoning as ota.status's int mirror.
+void dial_state_set_haptics_level(uint8_t level);
 
 // Day/night backlight brightness preference, 10..100 (percent, 10% steps).
 // Getters always return a value in that range (clamped on read; 100 when no
 // "bri_day"/"bri_night" NVS key has ever been written). Setters clamp too and
 // persist immediately to NVS "ui"/"bri_day" and "ui"/"bri_night" — same
-// immediate-commit pattern as dial_state_set_haptics_enabled above. dial_state
+// immediate-commit pattern as dial_state_set_haptics_level above. dial_state
 // has no business knowing about the backlight driver, so callers that want the
 // new brightness to actually take effect must also call
 // dial_power_brightness_changed() (dial_power.h), same division of labor as
-// haptics_enabled/dial_haptics_set_enabled().
+// haptics_level/dial_haptics_set_level().
 uint8_t dial_state_get_bri_day_pct(void);
 uint8_t dial_state_get_bri_night_pct(void);
 void    dial_state_set_bri_day_pct(uint8_t pct);
 void    dial_state_set_bri_night_pct(uint8_t pct);
+
+// Beta OTA channel preference (see app_state_t.beta above). Same
+// getter+setter shape as the brightness pair; setter persists immediately to
+// NVS "ui"/"beta".
+bool dial_state_get_beta(void);
+void dial_state_set_beta(bool enabled);
+
+// "Dial adjusts" preference (see app_state_t.sched_follow above). Same
+// getter+setter shape as beta; setter persists immediately to NVS
+// "ui"/"sched_follow".
+bool dial_state_get_sched_follow(void);
+void dial_state_set_sched_follow(bool follow);
 
 // Screen rotation, quarter turns clockwise (0..3). Persisted; apply it to the
 // panel with dial_display_set_rotation.
@@ -426,18 +493,19 @@ typedef enum {
     CMD_WIFI_RESET,      // clear Wi-Fi credentials
     CMD_FACTORY_RESET,   // erase all of NVS
 
-    // Software update (M6), from Settings' "Software update" row.
-    CMD_OTA_CHECK,       // -> dial_ota_check(); zone/a/b unused
+    // Software update (M6/M7), from SCR_UPDATE's "Check for updates" row.
+    CMD_OTA_CHECK,       // -> dial_ota_check(st.beta); zone/a/b unused
     CMD_OTA_APPLY,       // -> dial_ota_download_and_apply() + reboot on
                          // success; worker drops this unless ota.status is
                          // already OTA_AVAILABLE (stale-tap guard)
-    // Posted by scr_settings.c's destroy() (screen teardown) so a FAILED
-    // Software update row never survives to the next visit -- OTA_FAILED
-    // isn't allowed to be terminal (field bug: it used to stay wedged until
-    // a manual power cycle). -> dial_ota_clear_stale_failure(0); zone/a/b
-    // unused. A no-op if status has already moved off OTA_FAILED. See also
-    // main.c's periodic idle-loop call for the time-based ~25s auto-clear
-    // that covers the case where the user never leaves the screen at all.
+    // Posted by scr_update.c's destroy() (screen teardown, M7 -- scr_about.c
+    // before it) so a FAILED "Check for updates" row never survives to the
+    // next visit -- OTA_FAILED isn't allowed to be terminal (field bug: it
+    // used to stay wedged until a manual power cycle). ->
+    // dial_ota_clear_stale_failure(0); zone/a/b unused. A no-op if status
+    // has already moved off OTA_FAILED. See also main.c's periodic
+    // idle-loop call for the time-based ~25s auto-clear that covers the
+    // case where the user never leaves the screen at all.
     CMD_OTA_CLEAR_FAILED,
 } cmd_kind_t;
 

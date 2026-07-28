@@ -39,6 +39,8 @@ static EventGroupHandle_t s_events;
 static volatile bool s_connected;
 static int s_retries;
 static char s_ap_ssid[16];
+static char s_sta_ssid[33];   // home network name; see dial_net_sta_ssid()
+static char s_hostname[24];   // "orion-dial-xxxxxx" — see dial_net_hostname()
 static esp_netif_t *s_sta_netif, *s_ap_netif;
 static httpd_handle_t s_httpd;
 static TaskHandle_t   s_dns_task;
@@ -219,12 +221,18 @@ void dial_net_init(void)
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "OrionDial-%02X%02X", mac[4], mac[5]);
+    // Same MAC, one more byte (3 instead of 2 — a plain human isn't reading
+    // this one off a Wi-Fi picker, so the extra collision margin is free) and
+    // lowercase (DNS labels are conventionally lowercase). See dial_net_hostname.
+    snprintf(s_hostname, sizeof(s_hostname), "orion-dial-%02x%02x%02x", mac[3], mac[4], mac[5]);
 
     const esp_timer_create_args_t rt = { .callback = retry_timer_cb, .name = "wifi_retry" };
     ESP_ERROR_CHECK(esp_timer_create(&rt, &s_retry_timer));
 }
 
 const char *dial_net_ap_ssid(void) { return s_ap_ssid; }
+const char *dial_net_sta_ssid(void) { return s_sta_ssid; }
+const char *dial_net_hostname(void) { return s_hostname; }
 bool dial_wifi_is_connected(void) { return s_connected; }
 
 bool dial_net_ip(char *out, size_t sz)
@@ -253,6 +261,8 @@ void dial_net_seed(const char *ssid, const char *pass)
 
 static bool sta_connect(const char *ssid, const char *pass, int timeout_ms)
 {
+    strlcpy(s_sta_ssid, ssid, sizeof(s_sta_ssid));   // the name a screen can show, win or lose
+
     wifi_config_t wc = { 0 };
     strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
     strncpy((char *)wc.sta.password, pass, sizeof(wc.sta.password) - 1);

@@ -6,10 +6,10 @@
  * Implements exactly the dial_state.h entry points the compiled dial_ui
  * screens call (verified against every scr_*.c + ui_router.c): dial_state_get,
  * set_ui_temp, set_zone_on, set_ui_zone, set_welcomed, set_side_picked,
- * set_units_c, set_haptics_enabled, set_rotation, set_wifi_join,
+ * set_units_c, set_rel_mode, set_haptics_level, set_rotation, set_wifi_join,
  * clear_wifi_join_failed, set_phase, stamp_input, get/set_bri_day_pct,
- * get/set_bri_night_pct, and dial_cmd_post (a logging no-op — there is no
- * worker task here to drain the queue).
+ * get/set_bri_night_pct, set_beta, set_sched_follow, and dial_cmd_post (a
+ * logging no-op — there is no worker task here to drain the queue).
  *
  * No mutex: this whole simulator is one thread pumping the LVGL tick, so
  * "under the store mutex" collapses to "just mutate the global."
@@ -30,6 +30,8 @@ void sim_state_reset(void)
     s_state.wifi_join_idx = -1;
     s_state.bri_day_pct = 100;    // matches dial_state_init's fresh-device default,
     s_state.bri_night_pct = 100;  // so screenshots render scr_settings' new rows as "100%"
+    s_state.haptics_level = 1;    // HAPTIC_LEVEL_AUTO — matches dial_state_init's default
+    s_state.sched_follow = true;  // "Dial adjusts" default — matches dial_state_init's default
     s_state.generation = 1;
 }
 
@@ -77,9 +79,9 @@ void dial_state_set_rel_mode(bool rel_mode)
     s_state.generation++;
 }
 
-void dial_state_set_haptics_enabled(bool enabled)
+void dial_state_set_haptics_level(uint8_t level)
 {
-    s_state.haptics_enabled = enabled;
+    s_state.haptics_level = level;
     s_state.generation++;
 }
 
@@ -101,6 +103,18 @@ void dial_state_set_bri_day_pct(uint8_t pct)
 void dial_state_set_bri_night_pct(uint8_t pct)
 {
     s_state.bri_night_pct = pct;
+    s_state.generation++;
+}
+
+void dial_state_set_beta(bool enabled)
+{
+    s_state.beta = enabled;
+    s_state.generation++;
+}
+
+void dial_state_set_sched_follow(bool follow)
+{
+    s_state.sched_follow = follow;
     s_state.generation++;
 }
 
