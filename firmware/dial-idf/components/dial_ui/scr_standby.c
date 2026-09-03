@@ -215,7 +215,27 @@ static bool on_knob(int detents)
     return true;
 }
 
+// Swipe down opens the hidden diagnostics face (UI_DESIGN_SPEC.md §"Standby":
+// "repurposed since Standby is the root and 'back' has nowhere else to go").
+//
+// In practice this path is nearly unreachable and that is by design, not by
+// accident: nav_policy only parks on this face while dial_power_level() is
+// STANDBY, and main.c's touch_filter swallows a standby touch from press to
+// release to honour the wake-consumes-first-input rule. So the usual outcome
+// of swiping down on a dark clock is "the screen wakes", and the router has
+// moved on to SCR_DIAL before a second gesture can land. It is wired anyway
+// because the face IS the spec'd root for this gesture, it costs four lines,
+// and a wake that lands here without consuming (the dispatcher's tick racing
+// the filter) should do the spec'd thing rather than nothing. SCR_DIAL carries
+// the same gesture as the entry a person can actually hit while awake.
+static bool on_gesture(lv_dir_t dir)
+{
+    if (dir != LV_DIR_BOTTOM) return false;
+    ui_router_go(SCR_DIAG, NULL, LV_SCR_LOAD_ANIM_MOVE_BOTTOM);
+    return true;
+}
+
 const ui_screen_t scr_standby = {
     .create = create, .destroy = destroy, .on_state = on_state,
-    .on_knob = on_knob,
+    .on_knob = on_knob, .on_gesture = on_gesture,
 };

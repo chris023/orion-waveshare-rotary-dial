@@ -37,8 +37,19 @@ typedef enum {
     SCR_UPDATE,           // update submenu: check for updates + beta builds toggle (arg: unused/NULL — returns to SCR_MENU)
     SCR_UPDATING,         // full-screen OTA install takeover (M6, arg: unused/NULL)
     SCR_UPDATE_PROMPT,    // dismissible "update available" sheet over the dial (docs/SPEC-update-prompt.md, arg: zone_idx_t to return to)
+    SCR_DIAG,             // hidden diagnostics face: Wi-Fi/battery/build (UI_DESIGN_SPEC.md, swipe down; arg: see DIAG_ARG_FROM_DIAL)
     SCR_COUNT,
 } screen_id_t;
+
+/*
+ * SCR_DIAG's arg encodes where the user came from, so backing out of the face
+ * returns them there instead of always dumping them on the clock.
+ *   NULL / 0                      -> opened from SCR_STANDBY, back goes there
+ *   DIAG_ARG_FROM_DIAL | zone_idx -> opened from SCR_DIAL, back returns to
+ *                                    that page (bit 0 carries the zone, the
+ *                                    same low-bit packing scr_boost uses)
+ */
+#define DIAG_ARG_FROM_DIAL 2u
 
 typedef struct {
     // Build the widget tree onto `scr` (an empty lv_obj screen). `arg` is the

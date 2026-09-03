@@ -545,6 +545,20 @@ typedef struct {
     // deliberate dismissal can never race the worker's own next tick.
     bool ota_prompt_due;
 
+    // Battery, sampled off ADC1 ch0 (GPIO1 / BATT_ADC) by dial_battery.
+    // Session-only, never persisted: a stale level read out of NVS at boot
+    // would be worse than the half-second of zeroes before the first sample.
+    //
+    // batt_mv is the `5V` rail, which is the charger while USB is attached
+    // and the cell once it is not. batt_charging is that distinction, taken
+    // with hysteresis around DIAL_BATTERY_MV_USB_ON/OFF. batt_pct is
+    // DIAL_BATTERY_PCT_UNKNOWN (-1) whenever batt_charging is true, because
+    // the pin cannot see the cell through the charger and a number there
+    // would be fiction. Zero until the first sample lands.
+    int  batt_mv;
+    int  batt_pct;
+    bool batt_charging;
+
     // Bumped on every commit; the UI dispatcher re-renders when it changes.
     uint32_t generation;
 } app_state_t;
@@ -729,6 +743,12 @@ void dial_state_set_rotation(uint8_t quarters);
 void dial_state_set_wifi_join(int idx, const char *ssid);
 void dial_state_set_wifi_join_failed(void);
 void dial_state_clear_wifi_join_failed(void);
+
+// Battery sample from dial_battery's task. Not persisted (see app_state_t's
+// batt_* comment). Skips the commit when nothing moved, so a dial sitting on
+// the charger does not wake every screen's on_state every 30 seconds for a
+// reading that did not change.
+void dial_state_set_battery(int mv, int pct, bool charging);
 
 // --- Input quiet-period gate (torn-read-safe on 32-bit) ---
 void    dial_state_stamp_input(void);   // call on EVERY user input

@@ -12,6 +12,7 @@
 #include "dial_haptics.h"
 #include "dial_ota.h"
 #include "dial_icons.h"
+#include "dial_battery.h"
 #include "esp_timer.h"
 #include <math.h>
 #include <time.h>
@@ -181,6 +182,24 @@ static lv_obj_t *s_boost_cool_icon, *s_boost_heat_icon;
 static lv_obj_t *s_boost_cool_tap, *s_boost_heat_tap;
 static lv_obj_t *s_dot_a, *s_dot_b, *s_dot_menu;
 static lv_obj_t *s_away_lbl;
+// Battery badge: a drawn cell outline plus the percentage, hidden on USB.
+// See create(). s_batt_box is the flex row that owns the pair, and is what
+// on_state hides, aligns and breathes — the parts never move on their own.
+static lv_obj_t *s_batt_box;
+static lv_obj_t *s_batt_shell;   // the outline
+static lv_obj_t *s_batt_fill;    // proportional charge bar inside it
+static lv_obj_t *s_batt_nub;     // the positive terminal, what makes it read as a cell
+static lv_obj_t *s_batt_lbl;
+static bool s_batt_pulsing;
+
+// Outline geometry. The shell's 1px border eats 2 of its 24, leaving a 22x10
+// interior; the fill insets 2 more all round, so it spans 2..20 horizontally
+// and can be at most BATT_FILL_MAX wide.
+#define BATT_W         24
+#define BATT_H         12
+#define BATT_FILL_MAX  18
+#define BATT_FILL_MIN   2   // a sliver at 0% reads as empty, an absent bar reads as broken
+#define BATT_FILL_H     6
 static lv_obj_t *s_ota_lbl;   // OTA notice, dual-purpose: "Finalizing
                                // update..." / "Update available" — see create()
 static lv_point_t s_dash_pts[2];
@@ -1110,6 +1129,80 @@ static void apply_palette_and_state(const app_state_t *st)
     if (st->away) lv_obj_clear_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
     else          lv_obj_add_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
 
+    // Battery badge — on-battery only (see create()). Low is red AND
+    // breathing: the spec is explicit that a warning is never colour-only
+    // (UI_DESIGN_SPEC.md §2), and a red glyph on the night palette is easy
+    // to miss at a glance.
+    // batt_mv == 0 is "no sample yet" — app_state_t zero-inits, so without
+    // this the face would flash a pulsing red 0% for the first few seconds
+    // of every boot.
+    if (st->batt_charging || st->batt_mv == 0 || st->batt_pct < 0) {
+        lv_obj_add_flag(s_batt_box, LV_OBJ_FLAG_HIDDEN);
+        if (s_batt_pulsing) {
+            lv_anim_del(s_batt_box, set_opa_cb);
+            lv_obj_set_style_opa(s_batt_box, LV_OPA_COVER, 0);
+            s_batt_pulsing = false;
+        }
+    } else {
+        bool low = st->batt_pct <= DIAL_BATTERY_PCT_LOW;
+        lv_color_t ink = low ? pal->warning : pal->ink_secondary;
+
+        lv_label_set_text_fmt(s_batt_lbl, "%d%%", st->batt_pct);
+        lv_obj_set_style_text_color(s_batt_lbl, ink, 0);
+        lv_obj_set_style_border_color(s_batt_shell, ink, 0);
+        lv_obj_set_style_bg_color(s_batt_nub, ink, 0);
+        lv_obj_set_style_bg_color(s_batt_fill, ink, 0);
+
+        // Proportional, not bucketed. The floor keeps a sliver visible at the
+        // bottom of the range: an empty outline reads as a broken widget, a
+        // nearly-empty one reads as a nearly-empty battery.
+        lv_coord_t fw = (lv_coord_t)((st->batt_pct * BATT_FILL_MAX) / 100);
+        if (fw < BATT_FILL_MIN) fw = BATT_FILL_MIN;
+        lv_obj_set_size(s_batt_fill, fw, BATT_FILL_H);
+
+        lv_obj_clear_flag(s_batt_box, LV_OBJ_FLAG_HIDDEN);
+        if (low && !s_batt_pulsing) {
+            // Breathes the whole badge, outline included. Style opa cascades
+            // to children, so one animation covers all four parts.
+            lv_anim_t a;
+            lv_anim_init(&a);
+            lv_anim_set_var(&a, s_batt_box);
+            lv_anim_set_exec_cb(&a, set_opa_cb);
+            lv_anim_set_values(&a, LV_OPA_40, LV_OPA_COVER);
+            lv_anim_set_time(&a, 1000);
+            lv_anim_set_playback_time(&a, 1000);
+            lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+            lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+            lv_anim_start(&a);
+            s_batt_pulsing = true;
+        } else if (!low && s_batt_pulsing) {
+            lv_anim_del(s_batt_box, set_opa_cb);
+            lv_obj_set_style_opa(s_batt_box, LV_OPA_COVER, 0);
+            s_batt_pulsing = false;
+        }
+    }
+
+    // The two badges share row 44. Alone, either one sits dead centre. On the
+    // rare frame where both are up they read as one line, centred as a pair.
+    // Measured rather than nudged by a constant: the badge is a flex row sized
+    // to its content, so it is wider at "100%" than at "9%" and a fixed offset
+    // would leave the pair visibly off-centre at one end of the range.
+    {
+        bool both = st->away && !lv_obj_has_flag(s_batt_box, LV_OBJ_FLAG_HIDDEN);
+        if (both) {
+            const lv_coord_t gap = 14;
+            lv_obj_update_layout(s_batt_box);
+            lv_coord_t aw = lv_obj_get_width(s_away_lbl);
+            lv_coord_t bw = lv_obj_get_width(s_batt_box);
+            lv_coord_t x0 = -(aw + gap + bw) / 2;
+            lv_obj_align(s_away_lbl, LV_ALIGN_CENTER, 180 - CX + x0 + aw / 2, 44 - CY);
+            lv_obj_align(s_batt_box, LV_ALIGN_CENTER, 180 - CX + x0 + aw + gap + bw / 2, 44 - CY);
+        } else {
+            lv_obj_align(s_away_lbl, LV_ALIGN_CENTER, 180 - CX, 44 - CY);
+            lv_obj_align(s_batt_box, LV_ALIGN_CENTER, 180 - CX, 44 - CY);
+        }
+    }
+
     // OTA notice — one shared label, two mutually-exclusive states (see
     // create() for why both live in this exact slot):
     //   pending_verify (OTA rollback fix, M6) — "Finalizing update...".
@@ -1892,6 +1985,69 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_away_lbl, LV_ALIGN_CENTER, 180 - CX, 44 - CY);
     lv_obj_add_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
 
+    // Battery badge — same tier as AWAY above (Montserrat 12, same row),
+    // parked left of it so the two never overlap when the bed is away.
+    // Hidden whenever the dial is on USB, which is most of its life: a
+    // permanently-pinned "100%" on the primary face is noise, and while
+    // charging the rail is the charger so there is no honest level to show
+    // anyway (see dial_battery.h). It appears when the cord comes out, which
+    // is the only time the number means anything.
+    // The outline is drawn rather than set in a font. LVGL's battery symbols
+    // quantise to five buckets, which turns a real reading into a guess, and
+    // the icon font here carries only the boost glyphs. Drawn, the bar is
+    // proportional and every part takes the palette.
+    s_batt_box = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_batt_box);
+    lv_obj_set_size(s_batt_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_batt_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_batt_box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_batt_box, 7, 0);
+    lv_obj_clear_flag(s_batt_box, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    // Glyph wrapper. The nub sits outside the shell, so the two need a common
+    // parent to travel as one flex item.
+    lv_obj_t *glyph = lv_obj_create(s_batt_box);
+    lv_obj_remove_style_all(glyph);
+    lv_obj_set_size(glyph, BATT_W + 2, BATT_H);
+    lv_obj_clear_flag(glyph, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    s_batt_shell = lv_obj_create(glyph);
+    lv_obj_remove_style_all(s_batt_shell);
+    lv_obj_set_size(s_batt_shell, BATT_W, BATT_H);
+    lv_obj_align(s_batt_shell, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_radius(s_batt_shell, 3, 0);
+    lv_obj_set_style_border_width(s_batt_shell, 1, 0);   // hairline, matching the chassis ring
+    lv_obj_set_style_border_opa(s_batt_shell, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_batt_shell, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    s_batt_fill = lv_obj_create(s_batt_shell);
+    lv_obj_remove_style_all(s_batt_fill);
+    lv_obj_set_size(s_batt_fill, BATT_FILL_MIN, BATT_FILL_H);
+    lv_obj_align(s_batt_fill, LV_ALIGN_LEFT_MID, 2, 0);
+    lv_obj_set_style_radius(s_batt_fill, 1, 0);
+    lv_obj_set_style_bg_opa(s_batt_fill, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_batt_fill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    s_batt_nub = lv_obj_create(glyph);
+    lv_obj_remove_style_all(s_batt_nub);
+    lv_obj_set_size(s_batt_nub, 2, 6);
+    lv_obj_align(s_batt_nub, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_radius(s_batt_nub, 1, 0);
+    lv_obj_set_style_bg_opa(s_batt_nub, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_batt_nub, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    s_batt_lbl = lv_label_create(s_batt_box);
+    lv_obj_set_style_text_font(s_batt_lbl, &lv_font_montserrat_12, 0);
+    lv_label_set_text(s_batt_lbl, "");
+    lv_obj_clear_flag(s_batt_lbl, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    // Dead centre, sharing the AWAY badge's row. The face keeps every status
+    // marker in one centre column (stale dot 26, this row 44, OTA 330) and an
+    // off-centre badge reads as debris. on_state splits the pair apart on the
+    // rare frame where both are up.
+    lv_obj_align(s_batt_box, LV_ALIGN_CENTER, 180 - CX, 44 - CY);
+    lv_obj_add_flag(s_batt_box, LV_OBJ_FLAG_HIDDEN);
+
     // OTA notice — dual-purpose (see apply_palette_and_state): the M6
     // pending-verify "Finalizing update..." caption, and (owner
     // reassessment) the ambient "Update available" indicator. Both tiny,
@@ -1961,6 +2117,12 @@ static void destroy(void)
     s_boost_heat_icon = s_boost_heat_tap = NULL;
     s_dot_a = s_dot_b = s_dot_menu = NULL;
     s_away_lbl = NULL;
+    s_batt_box = NULL;
+    s_batt_shell = NULL;
+    s_batt_fill = NULL;
+    s_batt_nub = NULL;
+    s_batt_lbl = NULL;
+    s_batt_pulsing = false;
     s_ota_lbl = NULL;
     s_chevron_active = false;
     s_stale_shown = false;
@@ -2189,6 +2351,25 @@ static bool on_knob(int detents)
 // drops out of it and only the menu step survives.
 static bool on_gesture(lv_dir_t dir)
 {
+    // Swipe down opens the hidden diagnostics face. UI_DESIGN_SPEC.md hangs
+    // that gesture off Standby, but a standby touch never reaches a screen —
+    // main.c's touch_filter swallows it press-to-release under the
+    // wake-consumes-first-input rule, and by the next tick nav_policy has
+    // already moved here. So the awake dial face is the only place a person
+    // can actually perform the gesture. Standby wires it too, for the race
+    // where a wake lands there without being consumed.
+    //
+    // Same drag guard as the page swipes below: a gesture that grazes the
+    // setpoint handle must not both move the temperature and navigate.
+    if (dir == LV_DIR_BOTTOM) {
+        if (s_dragging) return false;
+        // Carry the page through so swiping back up lands where the user
+        // was, not on the clock.
+        ui_router_go(SCR_DIAG,
+                     (void *)(uintptr_t)(DIAG_ARG_FROM_DIAL | (unsigned)s_zone),
+                     LV_SCR_LOAD_ANIM_MOVE_BOTTOM);
+        return true;
+    }
     if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return false;
     // Never navigate while the setpoint handle is being dragged. The handle
     // doesn't bubble gestures so this shouldn't fire mid-drag, but a swipe that

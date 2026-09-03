@@ -27,6 +27,7 @@
 #include "dial_state.h"
 #include "dial_palette.h"
 #include "dial_ota.h"
+#include "dial_battery.h"   // DIAL_BATTERY_PCT_UNKNOWN for the charging scenario
 #include "sim_state.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -650,6 +651,97 @@ static void scenario_about(void)
     snapshot("about");
 }
 
+// The hidden diagnostics face (UI_DESIGN_SPEC.md "Wi-Fi/battery/build"),
+// reached by swiping down. Wi-Fi comes from stubs.c (connected, "HomeNet",
+// 192.168.1.23) rather than app_state_t, so only the battery fields need
+// setting here. 4056mV is a real reading off the bench dial on battery.
+// The dial face's own battery badge. Only shows on battery, so this scenario
+// is unplugged and low: red plus a 1s breathe, caught mid-cycle by the pump
+// below so the capture shows the reduced opacity rather than an endpoint.
+static void scenario_dial_batt_low(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->batt_mv = 3598;
+    st->batt_pct = 9;
+    st->batt_charging = false;
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(1100);
+    snapshot("dial-batt-low");
+}
+
+// Both row-44 badges up at once. Alone each sits dead centre; together they
+// split evenly around it. Also the only capture of the badge in its ordinary
+// (not-low) colour.
+static void scenario_dial_batt_away(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->away = true;
+    st->batt_mv = 3961;
+    st->batt_pct = 64;
+    st->batt_charging = false;
+    // Bounce off another screen first: ui_router_go early-returns when the
+    // target id and arg both match what is already loaded, so going straight
+    // back to SCR_DIAL/ZONE_A after the previous scenario would be a no-op.
+    ui_router_go(SCR_STANDBY, NULL, LV_SCR_LOAD_ANIM_NONE);
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
+    // snapshot() reads the framebuffer as-is, it does not render. Without a
+    // pump the capture is whatever the previous scenario left behind.
+    pump_ms(100);
+    snapshot("dial-batt-away");
+}
+
+static void scenario_diag(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->batt_mv = 4056;
+    st->batt_pct = 82;
+    st->batt_charging = false;
+    // Bounce through the dial first. ui_router_go returns early when the
+    // target is already current, so back-to-back SCR_DIAG scenarios would
+    // silently render the previous one's numbers three times. Going via the
+    // dial is also how a person actually reaches this face (swipe down).
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
+    ui_router_go(SCR_DIAG, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("diag");
+}
+
+// Same face on USB. The percentage is deliberately not shown while charging:
+// the rail is the charger's output, not the cell's, so any number would be a
+// guess dressed up as a measurement.
+static void scenario_diag_charging(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->batt_mv = 4732;
+    st->batt_pct = DIAL_BATTERY_PCT_UNKNOWN;
+    st->batt_charging = true;
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
+    ui_router_go(SCR_DIAG, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("diag-charging");
+}
+
+// Low battery. Exercises the warning treatment, which per UI_DESIGN_SPEC.md
+// ("Warning is never colour-only") is a colour change AND a 1s opacity
+// breathe. The still frame can only show the colour; pump past a full cycle
+// so the capture lands mid-breathe rather than at an endpoint.
+static void scenario_diag_low(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->batt_mv = 3612;
+    st->batt_pct = 11;
+    st->batt_charging = false;
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
+    ui_router_go(SCR_DIAG, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(1100);
+    snapshot("diag-low");
+}
+
 // Full-screen OTA install takeover (M6 UX hardening) — nav_policy forces this
 // in the real firmware the moment ota.status becomes OTA_DOWNLOADING, but the
 // simulator doesn't run a nav policy at all (every scenario navigates
@@ -749,6 +841,11 @@ int main(void)
     scenario_settings_brightness_clock_off();
     scenario_wifi_info();
     scenario_about();
+    scenario_dial_batt_low();
+    scenario_dial_batt_away();
+    scenario_diag();
+    scenario_diag_charging();
+    scenario_diag_low();
     scenario_updating();
     scenario_standby();
     scenario_standby_update();

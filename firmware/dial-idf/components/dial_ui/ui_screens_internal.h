@@ -27,6 +27,7 @@ extern const ui_screen_t scr_about;
 extern const ui_screen_t scr_update;
 extern const ui_screen_t scr_updating;
 extern const ui_screen_t scr_update_prompt;
+extern const ui_screen_t scr_diag;
 
 /*
  * Shared state->visual classification (design-spec.md §2's grammar table).

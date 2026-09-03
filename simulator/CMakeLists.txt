@@ -58,6 +58,7 @@ set(DIAL_UI_SRCS
   ${DIAL_UI_DIR}/scr_adjust_mode.c
   ${DIAL_UI_DIR}/scr_brightness_menu.c
   ${DIAL_UI_DIR}/scr_brightness.c
+  ${DIAL_UI_DIR}/scr_diag.c
   ${DIAL_UI_DIR}/dial_palette.c
   ${DIAL_UI_DIR}/dial_list.c
 )
@@ -90,6 +91,7 @@ target_include_directories(dial_sim PRIVATE
   ${FW_COMPONENTS}/dial_display
   ${FW_COMPONENTS}/dial_net
   ${FW_COMPONENTS}/dial_ota
+  ${FW_COMPONENTS}/dial_battery
   ${DIAL_UI_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 )

@@ -730,6 +730,25 @@ void dial_state_clear_ota_prompt_due(void)
     xSemaphoreGive(s_mux);
 }
 
+void dial_state_set_battery(int mv, int pct, bool charging)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    // The rail wanders a few mV between conversions even at rest. Committing
+    // that would bump the generation every 30s forever and re-render every
+    // screen for nothing, so only a real move counts. 20mV is well under one
+    // percent of the usable window and well over the converter's jitter.
+    bool moved = charging != s_state.batt_charging ||
+                 pct != s_state.batt_pct ||
+                 mv > s_state.batt_mv + 20 || mv < s_state.batt_mv - 20;
+    if (moved) {
+        s_state.batt_mv       = mv;
+        s_state.batt_pct      = pct;
+        s_state.batt_charging = charging;
+        s_state.generation++;
+    }
+    xSemaphoreGive(s_mux);
+}
+
 void dial_cmd_post(const app_cmd_t *cmd)
 {
     dial_state_stamp_input();

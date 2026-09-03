@@ -24,4 +24,5 @@ void ui_screens_register_all(void)
     ui_router_register(SCR_UPDATE, &scr_update);
     ui_router_register(SCR_UPDATING, &scr_updating);
     ui_router_register(SCR_UPDATE_PROMPT, &scr_update_prompt);
+    ui_router_register(SCR_DIAG, &scr_diag);
 }

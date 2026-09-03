@@ -34,6 +34,7 @@
 #include "dial_mcp.h"
 #include "dial_time.h"
 #include "dial_haptics.h"
+#include "dial_battery.h"
 #include "dial_power.h"
 #include "dial_palette.h"
 #include "dial_ota.h"
@@ -343,8 +344,12 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
             // was already here) — it's the one sub-screen where getting
             // yanked away mid-check/mid-confirm by a routine poll commit
             // would be user-visibly broken, not just an inconvenience.
+            // DIAG belongs here for the same reason ABOUT does: it is a
+            // read-only face someone swipes to and can fall asleep on, and a
+            // routine poll commit must not yank them off it mid-read.
             bool passive = cur == SCR_MENU ||
-                           cur == SCR_WIFI || cur == SCR_ABOUT || cur == SCR_UPDATE;
+                           cur == SCR_WIFI || cur == SCR_ABOUT || cur == SCR_UPDATE ||
+                           cur == SCR_DIAG;
             if (passive && dial_power_level() == DPWR_STANDBY) {
                 *arg = (void *)(uintptr_t)st->ui_zone;
                 return SCR_STANDBY;
@@ -2494,6 +2499,12 @@ void app_main(void)
     dial_state_init();
     dial_display_set_touch_filter(touch_filter);
     dial_power_start();
+
+    // Brings up ADC1 ch0 (GPIO1 / BATT_ADC) and starts the sampler task that
+    // feeds app_state_t.batt_*. Started after dial_state_init so the first
+    // sample has somewhere to land. See dial_battery.h for the divider and
+    // the measured plugged-vs-unplugged rail behaviour this relies on.
+    dial_battery_start();
 
     // Capture the boot's pending-verify state (rollback armed?) and mirror
     // it into app_state_t BEFORE the first screen renders below -- the

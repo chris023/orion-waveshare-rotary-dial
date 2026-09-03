@@ -211,6 +211,17 @@ void dial_state_clear_ota_prompt_due(void)
     s_state.generation++;
 }
 
+void dial_state_set_battery(int mv, int pct, bool charging)
+{
+    // No ADC here, so scenarios set the fields through sim_state_ptr()
+    // directly. This exists so the link resolves and so a scenario CAN drive
+    // it the way the firmware does if it wants to.
+    s_state.batt_mv       = mv;
+    s_state.batt_pct      = pct;
+    s_state.batt_charging = charging;
+    s_state.generation++;
+}
+
 void dial_state_set_wifi_join(int idx, const char *ssid)
 {
     s_state.wifi_join_idx = (int8_t)idx;
