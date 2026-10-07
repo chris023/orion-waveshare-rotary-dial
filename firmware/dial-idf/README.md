@@ -268,7 +268,7 @@ itself:
   it takes under a minute. Swipe right on the QR to back out, and if you leave
   it up the dial returns to the calm screen after 5 minutes. While it waits,
   the dial stops contacting Orion and the sign-in relay; it only checks for
-  updates if you ask from the menu. (Firmware 1.6.0 betas and later; older
+  updates if you ask from the menu. (Firmware 1.6.0 and later; older
   firmware shows the setup QR straight away instead.)
 - **The dial is stuck on "Connecting to Wi-Fi..." / "Orion unreachable."**
   These screens show the actual error and a retry countdown; the dial keeps

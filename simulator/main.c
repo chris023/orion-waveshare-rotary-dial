@@ -44,7 +44,7 @@
 // simulator reports as installed (stubs.c's esp_app_desc_t, which tracks
 // PROJECT_VER) — otherwise the screenshots show a dial offering to update
 // itself to something it already runs. Bump it with each release.
-#define SIM_OTA_LATEST "1.6.0"
+#define SIM_OTA_LATEST "1.6.1"
 
 /* ---- host framebuffer + LVGL display driver ----------------------------- */
 

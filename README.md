@@ -79,8 +79,8 @@ board bring-up notes, and firmware architecture live in
   periodically on its side (we've observed about 30 days after linking), and
   the dial can't extend them. When it happens the dial shows a quiet "Sign-in
   expired" screen (your bed keeps running its schedule meanwhile) with a
-  **Renew sign-in** button, and renewing takes under a minute. *(1.6.0 betas
-  and later.)*
+  **Renew sign-in** button, and renewing takes under a minute. *(1.6.0 and
+  later.)*
 - **Dual-zone control** with a side picker, so one dial can drive either
   half of the bed — plus screen rotation, so the same board reads right
   from either nightstand.

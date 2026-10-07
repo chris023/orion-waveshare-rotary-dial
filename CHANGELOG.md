@@ -12,6 +12,50 @@ section in the same commit that bumps `PROJECT_VER`.
 Releases marked **(beta)** were prereleases, visible only to dials with
 "Beta builds" turned on.
 
+## 1.6.0 — 2026-10-07
+
+The 1.6.0 stable release, rolling up 1.6.0-beta.1.
+
+### Added
+
+- **A calm "Sign-in expired" screen.** Every so often Orion ends the dial's
+  sign-in on its side (the one time we've measured it, that was about 30 days
+  after linking), and the dial can't extend it. Until now that moment looked
+  exactly like first-time setup: a full-screen QR code appeared out of nowhere,
+  which read as "something broke." Now the dial shows a quiet screen titled
+  **"Sign-in expired"**, reading "Your bed is still running its schedule.
+  Renew whenever you're ready." (it is: the topper keeps following its
+  schedule without the dial), with a single **Renew sign-in** button. Renewing
+  takes under a minute.
+  - The QR code only appears after you tap **Renew sign-in**. Swipe right to go
+    back without renewing.
+  - If you leave the QR code up and walk away, the dial returns to the calm
+    screen on its own after 5 minutes.
+  - While it waits, the dial stops contacting Orion and the sign-in relay; it
+    only checks for updates if you ask from the menu.
+  - Swipe left for the menu (Re-link, Wi-Fi, About, Update) as usual.
+
+### Changed
+
+- **No more "Orion unreachable" flash when the sign-in ended while the dial was
+  off.** If your sign-in expired while the dial was unplugged, it now goes
+  straight to the calm screen when it starts up.
+- **Fewer false alarms at startup.** When the dial's first sign-in check after
+  starting up is turned down, it now retries once quietly on "Linking to
+  Orion..." instead of flashing "Orion unreachable", and it uses the same
+  two-in-a-row rule as the running dial before deciding the sign-in has
+  ended.
+
+### Fixed
+
+- **Re-link, Change network and Factory reset could get stuck on the link
+  screens** when an update check was still pending. They now go through right
+  away.
+- **Check for updates now works from the link and Sign-in expired screens.**
+  Before, Menu → Update there only gave a buzz and did nothing.
+- **The link screens now dim at night like the rest of the dial.** They used
+  to stay at daytime brightness all night.
+
 ## 1.6.0-beta.1 — 2026-10-07 (beta)
 
 ### Added
