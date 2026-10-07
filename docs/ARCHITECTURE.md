@@ -29,6 +29,13 @@ router and the worker's own state machine:
    to approve the dial in their phone's browser, then polling a hosted relay
    (outbound HTTPS) for the returned authorization code. See
    [linking-relay.md](linking-relay.md).
+   - **`PH_OAUTH_LAPSED`** — a dial that *was* linked has had its Orion session
+     ended (the refresh token was permanently rejected — Orion ends sessions
+     periodically, observed once at ~30 days). The UI shows the calm "Sign-in
+     expired" screen instead of the QR, and the worker is parked — no Orion/relay
+     calls of its own — until the owner taps Renew, which re-enters 4 → 5 with the QR in
+     its "renew" copy. Swiping back off that QR, or leaving it up for 5
+     minutes, returns here.
 6. **`PH_MCP_CONNECTING`** — token in hand; opening the MCP session and
    discovering the paired Orion device (`list_devices`).
 7. **`PH_READY`** — steady state: the command/poll loop below.
@@ -73,7 +80,7 @@ to actually respond) and falls back to an idle cadence otherwise.
 | `dial_display` | QSPI panel + touch + LVGL bring-up; owns the LVGL task and lock |
 | `dial_knob` | Rotary encoder decoding (`bidi_switch_knob`) |
 | `dial_state` | The single state snapshot, UI→worker command queue, NVS-backed prefs |
-| `dial_ui` | Screen router + all `scr_*` screens (connecting, Wi-Fi portal/picker/passkey, OAuth QR, dial, menu, settings, adjustment mode, brightness menu + picker, standby, boost, update, update prompt, updating, about, error, welcome, side-pick) |
+| `dial_ui` | Screen router + all `scr_*` screens (connecting, Wi-Fi portal/picker/passkey, OAuth QR, sign-in expired, dial, menu, settings, adjustment mode, brightness menu + picker, standby, boost, update, update prompt, updating, about, error, welcome, side-pick) |
 | `dial_net` | Wi-Fi bring-up, credential storage, SoftAP portal, network scan |
 | `dial_oauth` | OAuth 2.1 discovery, Dynamic Client Registration, PKCE authorize/token, refresh |
 | `dial_mcp` | Raw MCP-over-HTTP client (JSON-RPC `tools/call`, session id, SSE parsing) |

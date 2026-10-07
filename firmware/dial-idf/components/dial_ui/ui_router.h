@@ -37,6 +37,7 @@ typedef enum {
     SCR_UPDATE,           // update submenu: check for updates + beta builds toggle (arg: unused/NULL — returns to SCR_MENU)
     SCR_UPDATING,         // full-screen OTA install takeover (M6, arg: unused/NULL)
     SCR_UPDATE_PROMPT,    // dismissible "update available" sheet over the dial (docs/SPEC-update-prompt.md, arg: zone_idx_t to return to)
+    SCR_LINK_EXPIRED,     // calm "Sign-in expired" + Renew (session lapsed; worker parked until Renew)
     SCR_COUNT,
 } screen_id_t;
 

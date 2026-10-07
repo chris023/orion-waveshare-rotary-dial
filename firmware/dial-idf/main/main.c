@@ -49,6 +49,17 @@
 #define WIFI_SSID     "your-wifi-ssid"
 #define WIFI_PASSWORD ""
 #endif
+// Dev-only: force the calm "Sign-in expired" screen on an unlinked dial so the
+// renewal flow can be exercised without waiting ~30 days for a real lapse. Set
+// ONLY via a separate build dir (`idf.py -B build-demo -DDIAL_DEMO_LAPSED=1
+// build`, wired in main/CMakeLists.txt) so the cached CMake variable can never
+// leak into a normal or release build. The forcing is RAM-only (worker_task)
+// for the same reason: NVS survives `idf.py flash`, so a persisted marker would
+// greet the next normal build with "Sign-in expired" on a never-linked dial.
+// Logged loudly at boot rather than #warning'd: IDF v6 builds with -Werror.
+#ifndef DIAL_DEMO_LAPSED
+#define DIAL_DEMO_LAPSED 0
+#endif
 #include "cJSON.h"
 
 static const char *TAG = "app";
@@ -118,7 +129,7 @@ static const char *TAG = "app";
 // finely that wait is chopped. The slice is only a responsiveness knob — it
 // bounds how long a reboot command posted from the link screen waits to be
 // noticed, so it wants to be well under the ~300ms that reads as instant, and
-// costs one queue peek each time round.
+// costs one queue receive each time round (consent_wait).
 #define CONSENT_WINDOW_MS 300000
 #define CONSENT_SLICE_MS     250
 // Poll the relay mailbox at most this often. Reboot servicing still runs every
@@ -204,6 +215,34 @@ static void knob_init(void)
 
 /* ---- navigation policy (runs in the LVGL task) ------------------------ */
 
+// Screens a user reaches ON PURPOSE from a pre-link screen (the menu face and
+// its sub-screens). Pre-link phases keep these where they are instead of
+// snapping back to the link screen on the next commit — the "never trap the
+// user" rule spelled out under PH_OAUTH_WAIT_CONSENT below. Swiping back off
+// the menu (ui_router_go_home) bypasses this, so it still lands on the link
+// screen with nothing to re-arm.
+static bool link_sticky(screen_id_t cur)
+{
+    return cur == SCR_MENU || cur == SCR_SETTINGS || cur == SCR_ABOUT ||
+           cur == SCR_WIFI || cur == SCR_BRIGHTNESS ||
+           cur == SCR_BRIGHTNESS_MENU || cur == SCR_UPDATE;
+}
+
+// The calm Sign-in expired screen is a RESTING state — a lapsed dial can sit on
+// it for days — so unlike the short-lived pre-link phases it gets the same idle
+// rule as the steady-state dial face (see the `passive` set under PH_READY): a
+// menu or passive sub-screen someone swiped to and walked away from falls back
+// to the calm screen once the display drops to standby, instead of a settings
+// page glowing (or, dimmed, sitting) on the nightstand all night. The
+// deliberate-tap sub-screens (SETTINGS, BRIGHTNESS*) stay put, as they do there.
+static screen_id_t lapsed_screen(screen_id_t cur)
+{
+    bool passive = cur == SCR_MENU ||
+                   cur == SCR_WIFI || cur == SCR_ABOUT || cur == SCR_UPDATE;
+    if (passive && dial_power_level() == DPWR_STANDBY) return SCR_LINK_EXPIRED;
+    return link_sticky(cur) ? cur : SCR_LINK_EXPIRED;
+}
+
 static screen_id_t nav_policy(const app_state_t *st, void **arg)
 {
     // OTA install takeover (M6 UX hardening): once the confirmed install on
@@ -287,12 +326,29 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         // still falls back to the QR, so swiping back off the menu returns to
         // the code on the next tick with nothing to re-arm.
         screen_id_t cur = ui_router_current();
-        if (cur == SCR_MENU || cur == SCR_SETTINGS || cur == SCR_ABOUT ||
-            cur == SCR_WIFI || cur == SCR_BRIGHTNESS ||
-            cur == SCR_BRIGHTNESS_MENU || cur == SCR_UPDATE)
-            return cur;
+        if (link_sticky(cur)) return cur;
+        // A renewal the owner just swiped back from (dial_state_link_cancel):
+        // the worker may still be inside a blocking relay poll and not yet
+        // have seen CMD_LINK_CANCEL, so the phase still says WAIT_CONSENT.
+        // Honour the swipe now rather than flicking the QR back up until the
+        // worker catches up and parks.
+        if (st->link_lapsed && st->link_qr_hidden) return SCR_LINK_EXPIRED;
         return SCR_OAUTH_QR;
     }
+    case PH_OAUTH_LAPSED: {
+        // The session expired and the worker is parked until Renew — the calm
+        // screen, with the same reachable menu as the QR (Re-link, Wi-Fi,
+        // update all still work from here: park_until_renew services them).
+        return lapsed_screen(ui_router_current());
+    }
+    case PH_OAUTH_DISCOVER:
+        // Right after Renew the worker re-runs discovery + registration before
+        // it can mint a code. On a lapsed dial that stays on the calm screen
+        // (its button reads "Getting a code..." in this phase) instead of
+        // flashing the generic "Linking to Orion..." between the tap and the
+        // QR; a deliberately opened menu stays put, as in the phases around it.
+        if (st->link_lapsed) return lapsed_screen(ui_router_current());
+        return SCR_CONNECTING;
     case PH_READY:
     case PH_DEGRADED:
     case PH_WIFI_LOST:
@@ -374,10 +430,7 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         // the swipe that gets there.
         {
             screen_id_t cur = ui_router_current();
-            if (cur == SCR_MENU || cur == SCR_SETTINGS || cur == SCR_ABOUT ||
-                cur == SCR_WIFI || cur == SCR_BRIGHTNESS ||
-                cur == SCR_BRIGHTNESS_MENU || cur == SCR_UPDATE)
-                return cur;
+            if (link_sticky(cur)) return cur;
         }
         return st->phase == PH_READY ? SCR_CONNECTING : SCR_ERROR;
     default:                    return SCR_CONNECTING;
@@ -772,6 +825,7 @@ static void mut_hold_until(app_state_t *st, void *arg)
 }
 
 static void mut_oauth_url(app_state_t *st, void *arg) { strlcpy(st->oauth_url, arg, sizeof(st->oauth_url)); }
+static void mut_link_lapsed(app_state_t *st, void *arg) { st->link_lapsed = *(bool *)arg; }
 static void mut_retry_in(app_state_t *st, void *arg)  { st->retry_in_s = *(int *)arg; }
 static void mut_ap_ssid(app_state_t *st, void *arg)   { strlcpy(st->ap_ssid, arg, sizeof(st->ap_ssid)); }
 static void mut_sta_ssid(app_state_t *st, void *arg)  { strlcpy(st->sta_ssid, arg, sizeof(st->sta_ssid)); }
@@ -1385,6 +1439,34 @@ static bool orion_refresh_schedules(void)
 
 /* ---- worker supervisor ------------------------------------------------- */
 
+// "Sign-in expired" (calm re-link). A dial whose Orion session ran out is not
+// the same as one that was never linked, and the two must not look the same:
+// the never-linked dial goes straight to the QR (first setup); the expired one
+// shows a quiet SCR_LINK_EXPIRED screen and makes NO network calls until the
+// owner taps Renew — re-minting a QR every five minutes and polling the relay
+// for it, all day, on a bedside dial nobody asked to re-link, is both alarming
+// and exactly the traffic pattern behind the 2026-07-28 router incident.
+//
+// s_link_lapsed: cached copy of the NVS "lapsed" marker (dial_oauth_set_
+// lapsed), mirrored to app_state_t.link_lapsed. Changed only through
+// set_lapsed_flag() below so the three never disagree.
+static bool s_link_lapsed;
+// Session-only: true from the owner's Renew tap until that renewal ends —
+// success, the consent window running out, or a swipe back off the QR. While
+// it's true the supervisor loop runs the normal link flow; while it's false a
+// lapsed dial parks (park_until_renew). Deliberately NOT cleared by a cert or
+// token-exchange failure: those show their reason on SCR_ERROR and retry the
+// renewal the owner already asked for, instead of silently dropping back to
+// the calm screen with no explanation.
+static bool s_renew_armed;
+
+static void set_lapsed_flag(bool on)
+{
+    dial_oauth_set_lapsed(on);
+    s_link_lapsed = on;
+    dial_state_commit(mut_link_lapsed, &s_link_lapsed);
+}
+
 // Settings' three destructive actions: each erases some NVS state and reboots.
 // There's no follow-up state commit because esp_restart() never returns — which
 // is also what makes them the only commands a mid-wait worker can safely run
@@ -1395,6 +1477,11 @@ static void run_reboot_cmd(const app_cmd_t *cmd)
     switch (cmd->kind) {
     case CMD_RELINK:
         ESP_LOGW(TAG, "settings: re-link requested — clearing Orion tokens");
+        // An explicit Re-link means "set this dial up again", not "renew": drop
+        // the lapsed marker too, so the next boot goes straight to the QR
+        // instead of the calm Sign-in expired screen. (forget() leaves it
+        // alone on purpose — see its header comment.)
+        dial_oauth_set_lapsed(false);
         dial_oauth_forget();
         esp_restart();
         break;
@@ -1418,19 +1505,55 @@ static bool cmd_reboots(cmd_kind_t k)
     return k == CMD_RELINK || k == CMD_WIFI_RESET || k == CMD_FACTORY_RESET;
 }
 
+static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
+                                  const char *client_id);
+
+// The menu's Update screen before linking. Checking for (and installing) a
+// firmware update needs GitHub, not Orion — no MCP session, no token — so the
+// pre-link waits run it instead of dropping it. Without this a lapsed dial,
+// which can now sit on the calm screen for days, answered Menu > Update >
+// Check for updates with a haptic tick and nothing else, while every comment
+// promised the menu still worked from there. It is owner-initiated, so it
+// doesn't break the parked dial's "no network calls of its own" rule. The
+// OAuth client's kept-alive socket (a refresh, discovery, a relay poll) is
+// handed back first: the OTA client opens its own TLS session, and a second
+// concurrent session fails its handshake on this build (the same reason the
+// steady-state handler releases the MCP one). CMD_OTA_CLEAR_FAILED rides along
+// (local only — Settings posts it on teardown so a FAILED row doesn't outlive
+// the visit, which now applies to a pre-link check too). Returns false for any
+// other kind.
+static bool prelink_run_ota_cmd(const app_cmd_t *cmd)
+{
+    if (cmd->kind != CMD_OTA_CHECK && cmd->kind != CMD_OTA_APPLY &&
+        cmd->kind != CMD_OTA_CLEAR_FAILED) return false;
+    dial_oauth_release_connection();
+    handle_immediate_cmd(cmd, NULL, NULL);   // the OTA cases use neither
+    return true;
+}
+
 // Sleep `ms`, but honour a queued reboot command instead of sleeping through it.
 //
 // This task is the only thing that drains the command queue, and it only gets
 // round to it once it has a live MCP session. So every long wait before that
-// point — the OAuth consent window (five minutes) and the retry backoff — made
+// point — the retry backoff, and originally the OAuth consent window (now
+// consent_wait, which has its own receive-and-drop rule) — made
 // Settings' reboot actions look broken: the screen posted the command, said
 // "Restarting…", and then just sat there. Owner-reported against Change network
 // from the link screen, which the new Wi-Fi link there made easy to reach.
 //
-// Only the reboot trio is run here; anything else needs state this task hasn't
-// built yet and stays queued, untouched, for the normal drain. Hence peek
-// rather than receive — taking a command we can't run would reorder the queue,
-// and re-posting it would spin this loop for the rest of the wait.
+// Only the reboot trio (and the menu's Update — prelink_run_ota_cmd) is run
+// here. Everything else is RECEIVED and dropped, the same rule as
+// park_until_renew/consent_wait. This used to peek instead,
+// leaving a command it couldn't run untouched for the normal drain — but every
+// caller is a pre-link backoff, where nothing else can run anyway, and a
+// non-reboot command parked at the head (an OTA check tapped from the menu,
+// say) then hid every reboot command queued BEHIND it for as long as the loop
+// kept failing: a renewal stuck on "Orion unreachable" said "Restarting…" on
+// Change network and never restarted, exactly when changing network was the
+// fix. A CMD_LINK_START dropped here is moot (the renewal it asks for is the
+// one retrying), and a CMD_LINK_CANCEL — a swipe back off the renewal QR that
+// lost the race to a code delivery whose exchange then failed — is honoured
+// by disarming, so this backoff ends on the calm screen, not a fresh QR.
 static void wait_servicing_reboots(int ms)
 {
     int64_t end = esp_timer_get_time() + (int64_t)ms * 1000;
@@ -1438,16 +1561,15 @@ static void wait_servicing_reboots(int ms)
         int64_t left_ms = (end - esp_timer_get_time()) / 1000;
         if (left_ms <= 0) return;
         app_cmd_t cmd;
-        if (!dial_cmd_peek(&cmd, (int)left_ms)) return;   // window elapsed
-        if (!cmd_reboots(cmd.kind)) {
-            // Something we can't run is parked at the head and will stay there.
-            // Serve out the rest of the wait in one sleep rather than peeking
-            // at it again and again.
-            left_ms = (end - esp_timer_get_time()) / 1000;
-            if (left_ms > 0) vTaskDelay(pdMS_TO_TICKS(left_ms));
-            return;
+        if (!dial_cmd_receive(&cmd, (int)left_ms)) return;   // window elapsed
+        if (cmd_reboots(cmd.kind)) run_reboot_cmd(&cmd);     // does not return
+        if (prelink_run_ota_cmd(&cmd)) continue;
+        if (cmd.kind == CMD_LINK_CANCEL && s_link_lapsed && s_renew_armed) {
+            ESP_LOGI(TAG, "renewal cancelled during backoff — will park");
+            s_renew_armed = false;
+            continue;
         }
-        run_reboot_cmd(&cmd);   // does not return
+        ESP_LOGI(TAG, "pre-link wait: dropping cmd %d", (int)cmd.kind);
     }
 }
 
@@ -1462,20 +1584,144 @@ static void backoff_wait(int seconds)
     dial_state_commit(mut_retry_in, &zero);
 }
 
+// Night mode: warm-dim + quiet haptics while the household sleeps. Real window
+// (M5): bedtime-30min -> wake+30min from ZONE_A's schedule (the dial's own
+// side: override_sleep_schedule_tonight has no user_id in its confirmed schema,
+// so it implicitly targets the token owner's account and only that side's
+// schedule can be trusted to describe this dial); falls back to a fixed
+// 21:00-07:00 window until that schedule is known.
+//
+// Split in two so the steady-state loop can reuse the schedule it already
+// parsed here (have_sched/wake_min feed its auto-update window) without
+// re-deriving it, while the pre-link waits — which have no schedule, and so
+// always take the 21:00-07:00 fallback — just call apply_night_window().
+// Returns the night flag it applied. out_have_sched/out_wake_min are nullable.
+static bool night_window_apply(const struct tm *lt, const app_state_t *st,
+                               bool *out_have_sched, int *out_wake_min)
+{
+    int now_min = lt->tm_hour * 60 + lt->tm_min;
+    const zone_state_t *za = &st->zones[ZONE_A];
+    int bed_min = 0, wake_min = 0;
+    bool have_sched = za->sched_valid &&
+        dial_parse_hhmm(za->sched_bedtime, &bed_min) &&
+        dial_parse_hhmm(za->sched_wakeup, &wake_min);
+
+    bool night;
+    if (have_sched) {
+        int start = ((bed_min - 30) % 1440 + 1440) % 1440;
+        int end   = (wake_min + 30) % 1440;
+        // The window almost always crosses midnight (bedtime ~21:00,
+        // wake ~07:00 next day); handle the wrap explicitly.
+        night = (start <= end) ? (now_min >= start && now_min < end)
+                               : (now_min >= start || now_min < end);
+    } else {
+        night = (lt->tm_hour >= 21 || lt->tm_hour < 7);
+    }
+    dial_power_set_night(night);
+    // Swap the UI palette too, and force a re-render — screens read
+    // PAL() from on_state, so a bare palette swap without a commit
+    // would sit unapplied until the next unrelated state change.
+    if (night != s_ui_night) {
+        s_ui_night = night;
+        dial_palette_set_night(night);
+        dial_state_commit(mut_bump, NULL);
+    }
+    if (out_have_sched) *out_have_sched = have_sched;
+    if (out_wake_min)   *out_wake_min = wake_min;
+    return night;
+}
+
+// The same night handling for waits that have no tick of their own: the
+// pre-link screens (SCR_LINK_EXPIRED can sit there all night) must dim at 3am
+// like everything else instead of glowing in day palette at day brightness.
+// No synced clock yet -> no change (the palette stays day, as at boot).
+static void apply_night_window(void)
+{
+    struct tm lt;
+    if (!dial_time_now(&lt)) return;
+    app_state_t st;
+    dial_state_get(&st);
+    night_window_apply(&lt, &st, NULL, NULL);
+}
+
+// The lapsed dial's resting state: wait — indefinitely, making no network
+// calls of its own — for the owner's Renew tap. Receives (not peeks) so a
+// command that can't run here is dropped instead of parking at the head of the
+// queue in front of Renew or Re-link (CMD_OTA_CHECK from SCR_UPDATE was the
+// case that used to wedge wait_servicing_reboots that way). The reboot trio
+// still runs, so Settings' Re-link / Change network / Factory reset all work
+// from the menu reached off the calm screen, and so does the menu's Update
+// (prelink_run_ota_cmd), which the owner asks for and which needs no Orion.
+static void park_until_renew(void)
+{
+    ESP_LOGI(TAG, "sign-in expired — parked until Renew");
+    for (;;) {
+        apply_night_window();
+        app_cmd_t cmd;
+        if (!dial_cmd_receive(&cmd, 1000)) continue;
+        if (cmd_reboots(cmd.kind)) run_reboot_cmd(&cmd);   // does not return
+        if (prelink_run_ota_cmd(&cmd)) continue;
+        if (cmd.kind == CMD_LINK_START) {
+            ESP_LOGI(TAG, "Renew tapped — starting renewal");
+            return;
+        }
+        ESP_LOGI(TAG, "parked: dropping cmd %d (needs a linked dial)", (int)cmd.kind);
+    }
+}
+
+typedef enum { CW_TIMEOUT, CW_CANCEL } consent_wait_t;
+
+// One slice of the consent window: sleep `ms`, but run a queued reboot command
+// at once and return CW_CANCEL when the owner swipes back off a RENEWAL QR
+// (CMD_LINK_CANCEL; first setup has no calm screen to go back to, so there it
+// is dropped). Same receive-and-drop rule as park_until_renew: anything else is
+// dropped rather than left to block the queue — a stray CMD_LINK_START from a
+// second Renew tap included, since the renewal it asks for is already running
+// — except the menu's Update, which runs here too (prelink_run_ota_cmd).
+// Applies the night window about once a second, so a QR left up at night dims
+// on schedule too.
+static consent_wait_t consent_wait(int ms)
+{
+    static int64_t s_next_night_us;
+    int64_t end = esp_timer_get_time() + (int64_t)ms * 1000;
+    for (;;) {
+        int64_t now = esp_timer_get_time();
+        if (now >= s_next_night_us) {
+            apply_night_window();
+            s_next_night_us = now + 1000000;
+        }
+        int64_t left_ms = (end - now) / 1000;
+        if (left_ms <= 0) return CW_TIMEOUT;
+        app_cmd_t cmd;
+        if (!dial_cmd_receive(&cmd, (int)left_ms)) return CW_TIMEOUT;
+        if (cmd_reboots(cmd.kind)) run_reboot_cmd(&cmd);   // does not return
+        if (prelink_run_ota_cmd(&cmd)) continue;
+        if (cmd.kind == CMD_LINK_CANCEL && s_link_lapsed) return CW_CANCEL;
+        ESP_LOGI(TAG, "link screen: dropping cmd %d", (int)cmd.kind);
+    }
+}
+
 // Consecutive refresh failures classified PERMANENT (dial_oauth_last_token_err_
 // permanent -- RFC 6749 §5.2 invalid_grant). Two in a row, not one, so a single
 // server-side fluke can't force a re-link; reset on any success or
 // transient-classified failure. Steady state only calls with_auth_retry every
 // ~10s (poll) or on a rare write, so two hits is at most ~20s to recover.
+// The boot-time refreshes in worker_task share it: since a strike there marks
+// the dial lapsed and ERASES the refresh token (no way back but Renew), they
+// need the same debounce at least as much — before the lapsed state, a single
+// boot-time invalid_grant only dropped the access token and the next pass
+// retried the same refresh token, so a one-off fluke healed by itself.
 static int s_perm_refresh_failures = 0;
 
 // 401-aware call wrapper: on failure, refresh the token, reopen the MCP
 // session, retry once. Used for polls AND writes so an expired token never
 // silently drops a command. If the refresh token itself is dead (not just
 // this call), that never clears on its own -- after two consecutive
-// permanent-classified refresh failures, forget the tokens and reboot into
-// the QR consent screen, exactly like the manual CMD_RELINK path, instead of
-// presenting the same dead token forever.
+// permanent-classified refresh failures, forget the tokens and reboot —
+// marked lapsed, so the dial comes back up on the calm Sign-in expired screen
+// rather than a QR — instead of presenting the same dead token forever.
+
+
 static bool with_auth_retry(bool (*call)(void *), void *arg,
                             const oauth_disc_t *disc, const char *client_id)
 {
@@ -1489,6 +1735,12 @@ static bool with_auth_retry(bool (*call)(void *), void *arg,
     if (dial_oauth_last_token_err_permanent()) {
         if (++s_perm_refresh_failures >= 2) {
             ESP_LOGE(TAG, "refresh token permanently rejected (x%d) — re-linking", s_perm_refresh_failures);
+            // Marked BEFORE forget(): the marker is what makes the next boot
+            // show the calm Sign-in expired screen instead of a cold QR, and a
+            // power cut between the two writes then leaves "lapsed + refresh
+            // token", which the boot consistency check resolves in favour of
+            // the token (worker_task) rather than "no token, no marker".
+            set_lapsed_flag(true);
             dial_oauth_forget();
             esp_restart();
         }
@@ -1711,6 +1963,13 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
     case CMD_OTA_CLEAR_FAILED:
         if (dial_ota_clear_stale_failure(0)) commit_ota_snapshot();
         break;
+    // Pre-link only (park_until_renew / consent_wait). One can still be sitting
+    // in the queue at the moment linking completes — e.g. a swipe back off the
+    // renewal QR that raced the token exchange — and by then there is nothing
+    // to start or cancel.
+    case CMD_LINK_START:
+    case CMD_LINK_CANCEL:
+        break;
     default:
         break;   // CMD_SET_TEMP/CMD_TOGGLE_ON never reach here (see the drain loop)
     }
@@ -1793,6 +2052,28 @@ static void worker_task(void *arg)
         dial_haptics_set_level((haptic_level_t)st.haptics_level);
     }
 
+    // ---- Sign-in expired marker (see s_link_lapsed) ----
+    // Read before Wi-Fi so the very first pre-link screen is already the right
+    // one; nothing here touches the network.
+    s_link_lapsed = dial_oauth_is_lapsed();
+#if DIAL_DEMO_LAPSED
+    // In RAM only — never dial_oauth_set_lapsed(): see DIAL_DEMO_LAPSED. A
+    // renewal that succeeds still clears NVS through set_lapsed_flag(false),
+    // which is a no-op erase here.
+    ESP_LOGW(TAG, "DEMO BUILD: DIAL_DEMO_LAPSED=1 — forcing sign-in-expired state when unlinked");
+    if (!dial_oauth_have_refresh()) s_link_lapsed = true;
+#endif
+    // Consistency: every path that sets the marker also erases the refresh
+    // token right after (forget()), and every renewal clears it on success, so
+    // "lapsed AND a refresh token" can only be an interrupted write. Trust the
+    // token — if it really is dead, the next refresh re-marks the dial anyway.
+    if (s_link_lapsed && dial_oauth_have_refresh()) {
+        ESP_LOGW(TAG, "lapsed marker set but a refresh token is present — clearing the marker");
+        dial_oauth_set_lapsed(false);
+        s_link_lapsed = false;
+    }
+    dial_state_commit(mut_link_lapsed, &s_link_lapsed);
+
     // ---- Wi-Fi (blocking bringup; portal phase published via events) ----
     dial_state_set_phase(PH_WIFI_CONNECTING, NULL);
     dial_net_bringup();
@@ -1807,7 +2088,19 @@ static void worker_task(void *arg)
 
     // ---- OAuth + MCP with retry/backoff on every step ----
     for (;;) {
+        // An expired session waits here, quietly and offline, until the owner
+        // asks to renew (park_until_renew). Every way out of a renewal that
+        // ISN'T a reason to show (consent window ran out, swipe back) clears
+        // s_renew_armed and `continue`s, landing back here.
+        if (s_link_lapsed && !s_renew_armed) {
+            dial_state_set_phase(PH_OAUTH_LAPSED, NULL);
+            park_until_renew();          // returns only on CMD_LINK_START
+            s_renew_armed = true;
+            backoff_s = BACKOFF_MIN_S;   // a fresh, owner-initiated attempt
+            prep_fast_retries = 0;
+        }
         dial_state_set_phase(PH_OAUTH_DISCOVER, NULL);
+        bool authorized = false;   // a code was exchanged for tokens on this pass
 
         // The redirect_uri is now the hosted relay's /cb — one stable constant
         // for the WHOLE FLEET (dial_link_config.h). The phone reaches it over
@@ -1854,8 +2147,48 @@ static void worker_task(void *arg)
         }
         prep_fast_retries = 0;   // prep steps went through; re-arm fast retry for any later pass
 
-        if (!dial_oauth_have_valid_access() && !dial_oauth_refresh(&disc, client_id)) {
-            // Interactive consent: QR on screen; on timeout, a fresh QR — no dead end.
+        bool need_consent = false;
+        if (!dial_oauth_have_valid_access()) {
+            // Sampled BEFORE the refresh: dial_oauth_refresh returns early,
+            // without touching dial_oauth_last_token_err_permanent(), when
+            // there's no refresh token to send — so after an earlier lapse in
+            // this same boot that flag can still read true from the refresh
+            // that caused it. Only a refresh that actually went out may mark
+            // the dial lapsed; otherwise every Renew would bounce straight
+            // back here.
+            bool had_refresh = dial_oauth_have_refresh();
+            if (!dial_oauth_refresh(&disc, client_id)) {
+                if (had_refresh && dial_oauth_last_token_err_permanent()) {
+                    if (++s_perm_refresh_failures < 2) {
+                        // First strike (s_perm_refresh_failures): keep the
+                        // refresh token and try it once more after a short
+                        // pause, still on "Linking to Orion...". A real lapse
+                        // costs five seconds; a fluke costs nothing.
+                        ESP_LOGW(TAG, "refresh permanently rejected at boot (x1) — retrying once");
+                        wait_servicing_reboots(PREP_RETRY_MS);
+                        continue;
+                    }
+                    // The session ran out while the dial was off (or between
+                    // boots): the refresh token is dead for good. That is a
+                    // lapse, not first setup — mark it, unlink, and let the
+                    // loop top park on the calm screen. No backoff: there is
+                    // nothing to retry.
+                    ESP_LOGW(TAG, "refresh permanently rejected at boot (x%d) — sign-in expired",
+                             s_perm_refresh_failures);
+                    s_perm_refresh_failures = 0;
+                    set_lapsed_flag(true);
+                    dial_oauth_forget();
+                    continue;
+                }
+                if (had_refresh) s_perm_refresh_failures = 0;   // transient: don't count it
+                need_consent = true;
+            } else {
+                s_perm_refresh_failures = 0;
+            }
+        }
+        if (need_consent) {
+            // Interactive consent: QR on screen. On timeout a fresh QR during
+            // first setup — no dead end; a renewal goes back to the calm screen.
             char url[600];
             if (!dial_oauth_start_authorize(&disc, client_id, redirect_uri, url, sizeof(url))) {
                 dial_state_set_phase(PH_DEGRADED,
@@ -1868,15 +2201,23 @@ static void worker_task(void *arg)
             // Wait out the consent window, servicing reboots every slice so a
             // Change network / Re-link / Factory reset tapped from the link
             // screen reboots now rather than in up to five minutes' time
-            // (wait_servicing_reboots). The exchange itself still runs in one go,
+            // (consent_wait). The exchange itself still runs in one go,
             // once the code is in. Between slices the dial polls the relay
             // mailbox (outbound HTTPS GET) for the code the phone's redirect
             // deposited there — this replaced the old inbound LAN callback —
             // throttled to RELAY_POLL_INTERVAL_MS. The window is measured off the
             // monotonic clock, not a slice counter, so a blocking poll can't
             // stretch the nominal CONSENT_WINDOW_MS to hours on a slow relay.
+            //
+            // The slice wait is consent_wait rather than wait_servicing_reboots
+            // because it also takes the swipe back off a renewal QR
+            // (CMD_LINK_CANCEL), and it receives rather than peeks, so a
+            // command it can't run is dropped instead of parking at the head
+            // of the queue in front of Re-link (the menu's Update, which it
+            // CAN run, it runs — prelink_run_ota_cmd).
             int64_t consent_start = esp_timer_get_time();
             int64_t next_poll_us = 0;   // poll immediately on the first pass
+            bool cancelled = false;
             while (!dial_oauth_have_code() &&
                    (esp_timer_get_time() - consent_start) < (int64_t)CONSENT_WINDOW_MS * 1000) {
                 if (esp_timer_get_time() >= next_poll_us) {
@@ -1884,7 +2225,15 @@ static void worker_task(void *arg)
                     next_poll_us = esp_timer_get_time() + (int64_t)RELAY_POLL_INTERVAL_MS * 1000;
                     if (dial_oauth_have_code()) break;
                 }
-                wait_servicing_reboots(CONSENT_SLICE_MS);
+                if (consent_wait(CONSENT_SLICE_MS) == CW_CANCEL) { cancelled = true; break; }
+            }
+            if (cancelled) {
+                // Swiped back off the renewal QR: retire the authorize session
+                // (no more relay polling) and park on the calm screen.
+                ESP_LOGI(TAG, "renewal cancelled — back to the calm screen");
+                dial_oauth_stop_authorize();
+                s_renew_armed = false;
+                continue;
             }
             bool got = dial_oauth_have_code();
             // End the authorize session before the exchange. There is no
@@ -1908,6 +2257,15 @@ static void worker_task(void *arg)
                         dial_state_set_phase(PH_DEGRADED, DIAL_CERT_ERR_MSG);
                         backoff_wait(backoff_s);
                         backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
+                    } else if (s_link_lapsed) {
+                        // A renewal nobody finished: back to the calm screen,
+                        // NOT a fresh code. Re-minting every five minutes is
+                        // first setup's answer (someone is mid-setup and
+                        // needs a live code); here it would just keep a QR
+                        // and the relay polling alive all night for an owner
+                        // who walked away. Matches the QR's 5-minute sleep cap.
+                        ESP_LOGW(TAG, "renewal window elapsed — back to the calm screen");
+                        s_renew_armed = false;
                     } else {
                         ESP_LOGW(TAG, "consent window elapsed — new QR");
                     }
@@ -1927,9 +2285,17 @@ static void worker_task(void *arg)
                 backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
                 continue;
             }
+            authorized = true;
+            s_renew_armed = false;
         }
 
         dial_state_set_phase(PH_MCP_CONNECTING, NULL);
+        // Fresh tokens mean the sign-in is no longer expired, whatever device
+        // discovery says next — a "no Orion device" account problem must not
+        // leave the dial claiming its sign-in ran out. Cleared just AFTER the
+        // phase moves off WAIT_CONSENT so the renewal QR never flips to its
+        // first-setup copy for a frame on its way out.
+        if (authorized && s_link_lapsed) set_lapsed_flag(false);
         dial_oauth_release_connection();   // one connection to the host at a time
         bool linked = dial_mcp_connect(NULL) && orion_discover_device();
         // A bare, well-formed empty device list is an account problem, not a
@@ -1946,15 +2312,40 @@ static void worker_task(void *arg)
             // loop that skipped the refresh branch again on every pass, forever.
             // Force one refresh and retry.
             if (dial_oauth_refresh(&disc, client_id)) {
+                s_perm_refresh_failures = 0;
                 linked = dial_mcp_connect(NULL) && orion_discover_device();
-            } else if (dial_oauth_last_token_err_permanent()) {
-                // The refresh token is dead too (RFC 6749 §5.2 invalid_grant).
-                // Drop the stale access token so the next pass falls through to
-                // interactive consent (the QR) rather than spinning on
-                // credentials that can never work again.
-                ESP_LOGW(TAG, "refresh permanently rejected — re-linking");
+            } else if (dial_oauth_last_token_err_permanent() &&
+                       ++s_perm_refresh_failures < 2) {
+                // First strike (s_perm_refresh_failures): drop only the access
+                // token and go round again after a short pause — no backoff, no
+                // SCR_ERROR. The next pass sees no valid access token and
+                // retries the SAME refresh token in the consent branch above,
+                // which is where a second rejection marks the dial lapsed.
+                // Every boot whose stored access token has expired comes
+                // through here, so one invalid_grant fluke must not be enough
+                // to unlink it.
+                ESP_LOGW(TAG, "refresh permanently rejected (x1) — retrying once");
                 dial_oauth_forget_access();
+                wait_servicing_reboots(PREP_RETRY_MS);
+                continue;
+            } else if (dial_oauth_last_token_err_permanent()) {
+                // The refresh token is dead too (RFC 6749 §5.2 invalid_grant),
+                // twice running: the session has lapsed. Mark it and unlink
+                // (forget(), same as with_auth_retry's auto-relink — which also
+                // clears the cached client so the renewal registers against the
+                // relay redirect), then go straight back to the loop top, which
+                // parks on the calm screen. `continue` rather than falling into
+                // the backoff below: there is nothing to retry, and SCR_ERROR
+                // flashing "Orion unreachable" first would be both wrong and
+                // alarming.
+                ESP_LOGW(TAG, "refresh permanently rejected (x%d) — sign-in expired",
+                         s_perm_refresh_failures);
+                s_perm_refresh_failures = 0;
+                set_lapsed_flag(true);
+                dial_oauth_forget();
+                continue;
             } else {
+                s_perm_refresh_failures = 0;   // transient: don't count it
                 // Transient (network/5xx/etc): leave tokens alone and just fall
                 // into the same backoff/retry as any other connect failure below.
                 ESP_LOGW(TAG, "refresh failed (transient) — will retry");
@@ -1972,6 +2363,9 @@ static void worker_task(void *arg)
         break;
     }
     ESP_LOGI(TAG, "device linked; %d tools", dial_mcp_list_tools_count());
+    // Backstop for the clear after the token exchange above (idempotent): a
+    // linked dial is never "expired".
+    if (s_link_lapsed) set_lapsed_flag(false);
 
     bool first_poll_ok = with_auth_retry(poll_call, NULL, &disc, client_id);
     with_auth_retry(sched_call, NULL, &disc, client_id);   // M5: today's schedule, once up front
@@ -2109,48 +2503,20 @@ static void worker_task(void *arg)
                                 ota_pwr_level == DPWR_ACTIVE;
         s_ota_prev_pwr_level = ota_pwr_level;
 
-        // Night mode: warm-dim + quiet haptics while the household sleeps.
-        // Real window (M5): bedtime-30min -> wake+30min from ZONE_A's
-        // schedule (the dial's own side: override_sleep_schedule_tonight has
-        // no user_id in its confirmed schema, so it implicitly targets the
-        // token owner's account and only that side's schedule can be trusted
-        // to describe this dial); falls back to a fixed
-        // 21:00-07:00 window until that schedule is known.
+        // Night mode (night_window_apply: the schedule's window, or the
+        // 21:00-07:00 fallback until it's known).
         struct tm lt;
         if (dial_time_now(&lt)) {
             int now_min = lt.tm_hour * 60 + lt.tm_min;
             app_state_t st;
             dial_state_get(&st);
-            const zone_state_t *za = &st.zones[ZONE_A];
-            // Hoisted out of the night-window `if` below (was local to it)
-            // so the update-prompt/auto-update blocks further down can reuse
-            // the same wakeup time instead of re-deriving it — see the spec's
-            // explicit instruction to reuse this exact night-flag machinery.
-            int bed_min, wake_min;
-            bool have_sched = za->sched_valid &&
-                dial_parse_hhmm(za->sched_bedtime, &bed_min) &&
-                dial_parse_hhmm(za->sched_wakeup, &wake_min);
-
-            bool night;
-            if (have_sched) {
-                int start = ((bed_min - 30) % 1440 + 1440) % 1440;
-                int end   = (wake_min + 30) % 1440;
-                // The window almost always crosses midnight (bedtime ~21:00,
-                // wake ~07:00 next day); handle the wrap explicitly.
-                night = (start <= end) ? (now_min >= start && now_min < end)
-                                       : (now_min >= start || now_min < end);
-            } else {
-                night = (lt.tm_hour >= 21 || lt.tm_hour < 7);
-            }
-            dial_power_set_night(night);
-            // Swap the UI palette too, and force a re-render — screens read
-            // PAL() from on_state, so a bare palette swap without a commit
-            // would sit unapplied until the next unrelated state change.
-            if (night != s_ui_night) {
-                s_ui_night = night;
-                dial_palette_set_night(night);
-                dial_state_commit(mut_bump, NULL);
-            }
+            // have_sched/wake_min come back out so the update-prompt/auto-
+            // update blocks further down can reuse the same wakeup time
+            // instead of re-deriving it — see the spec's explicit instruction
+            // to reuse this exact night-flag machinery.
+            bool have_sched;
+            int wake_min;
+            bool night = night_window_apply(&lt, &st, &have_sched, &wake_min);
 
             // ---- Status pill hold/until (§3, scr_dial.c) ---------------------
             // Recomputed every idle tick, same cadence as the night-window calc

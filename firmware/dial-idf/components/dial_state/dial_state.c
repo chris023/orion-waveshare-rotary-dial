@@ -371,6 +371,26 @@ void dial_state_set_welcomed(void)
     xSemaphoreGive(s_mux);
 }
 
+void dial_state_link_renew(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.link_qr_hidden = false;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+    app_cmd_t cmd = { .kind = CMD_LINK_START };
+    dial_cmd_post(&cmd);
+}
+
+void dial_state_link_cancel(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.link_qr_hidden = true;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+    app_cmd_t cmd = { .kind = CMD_LINK_CANCEL };
+    dial_cmd_post(&cmd);
+}
+
 void dial_state_set_side_picked(void)
 {
     xSemaphoreTake(s_mux, portMAX_DELAY);

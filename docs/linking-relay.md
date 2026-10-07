@@ -156,20 +156,19 @@ cellular, on guest and client-isolated Wi-Fi, and through weak/roamed signal —
 anywhere the dial has working internet. It also retires the whole on-device
 port-80 HTTP server and its mDNS name, which existed only for this callback.
 
-**Does not address:** the **~weekly re-link prompt**. This change is about *how*
-a re-link completes, not *how often* one is triggered — the relay makes each
-re-link **reliable and inbound-free**, but does not make them less frequent.
+**Does not address:** *how often* a re-link is needed. This change is about *how*
+a re-link completes — the relay makes each one **reliable and inbound-free** —
+not how often Orion asks for one.
 
-We have **not** root-caused the weekly cadence. The leading hypothesis is a
-server-side refresh-token lifetime at Orion (the dial's refresh path itself is
-healthy — we captured a clean token rotation), but a firmware-side cause is not
-ruled out: e.g. a refresh-token **rotation-reuse** race, where the dial replays a
-stale refresh token after a reboot and Orion invalidates the whole family in
-response. Both present identically to a user (periodic re-consent) and to a
-naive log (a periodic `invalid_grant`); telling them apart needs a real failure
-captured with the refresh-token fingerprint, over a ~week-long window. We have
-not yet caught one — the only capture to date spanned ~13 hours. Until we do,
-treat the cause as **unconfirmed**.
+Orion ends sign-in sessions periodically on its side. A capture on 2026-10-06
+caught one end-to-end: the session ended server-side at what looks like a fixed
+lifetime, about **30 days after linking**, with the access token's lifetime
+clamped down as that point approached. The dial's refresh path was healthy
+throughout, and nothing it sends can extend the session. That is a single
+observation, so treat ~30 days as indicative rather than a guaranteed figure.
+From firmware 1.6.0 (first in 1.6.0-beta.1) the dial handles this calmly: instead
+of a setup QR it shows a quiet "Sign-in expired" screen (the bed keeps running its
+schedule meanwhile), and the owner renews from it in under a minute.
 
 ### Rollout
 

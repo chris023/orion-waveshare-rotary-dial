@@ -338,6 +338,39 @@ void dial_oauth_forget(void)
     nvs_close(h);
 }
 
+/* ---- "session lapsed" marker -------------------------------------------- */
+// A u8 in this same namespace, deliberately NOT erased by dial_oauth_forget():
+// forget() is exactly what a lapse calls, and the flag exists to survive it (and
+// the reboot that follows) so the next boot can tell "expired" from "never
+// linked". nvs_flash_erase (factory reset) still wipes it with everything else.
+#define NVS_KEY_LAPSED "lapsed"
+
+void dial_oauth_set_lapsed(bool on)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    if (on) nvs_set_u8(h, NVS_KEY_LAPSED, 1);
+    else    nvs_erase_key(h, NVS_KEY_LAPSED);   // ESP_ERR_NVS_NOT_FOUND is fine: already clear
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+bool dial_oauth_is_lapsed(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t v = 0;
+    bool lapsed = nvs_get_u8(h, NVS_KEY_LAPSED, &v) == ESP_OK && v == 1;
+    nvs_close(h);
+    return lapsed;
+}
+
+bool dial_oauth_have_refresh(void)
+{
+    char rt[512];   // same bound dial_oauth_refresh reads it with
+    return nvs_get("refresh", rt, sizeof(rt));
+}
+
 // Drop ONLY the access token, keeping the refresh token and client_id.
 // dial_oauth_have_valid_access() reports presence, not validity, so a token the
 // server has expired or revoked still reads as "valid" here and the supervisor

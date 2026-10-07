@@ -26,6 +26,8 @@ typedef enum {
     PH_WIFI_LOST,          // had Wi-Fi, lost it; supervisor is retrying
     PH_OAUTH_DISCOVER,     // discovery + client registration
     PH_OAUTH_WAIT_CONSENT, // QR on screen, waiting for phone approval
+    PH_OAUTH_LAPSED,       // the Orion session expired; worker parked (no network
+                           // calls) until the owner taps Renew on SCR_LINK_EXPIRED
     PH_MCP_CONNECTING,     // token ok; opening MCP + finding the device
     PH_READY,              // steady state: command + poll loop
     PH_DEGRADED,           // net up but Orion calls failing; retrying w/ backoff
@@ -375,6 +377,22 @@ typedef struct {
     // dial_state_restore_prefs, not its value.
     bool side_picked;
 
+    // --- Sign-in expired (calm re-link) ---
+    // Mirrors the worker's persisted NVS "oauth"/"lapsed" flag: true once this
+    // dial's Orion session has run out (the refresh token was permanently
+    // rejected), as opposed to a dial that was simply never linked. nav_policy
+    // routes a lapsed dial to the quiet SCR_LINK_EXPIRED screen instead of
+    // straight to the QR, and SCR_OAUTH_QR switches to its "renew" copy. Only
+    // the worker writes this (main.c's set_lapsed_flag); it clears once a
+    // renewal's token exchange succeeds.
+    bool link_lapsed;
+    // Session-only, written only by the UI (dial_state_link_cancel/_renew):
+    // true after the owner swiped back off the renewal QR. Lets the UI land on
+    // SCR_LINK_EXPIRED the instant they swipe, without nav_policy putting the
+    // QR straight back while the worker is still inside a blocking relay poll
+    // and hasn't yet seen CMD_LINK_CANCEL. Renew clears it.
+    bool link_qr_hidden;
+
     // --- Settings (M4) ---
     // Display units: false = °F (canonical/internal — the store's temp_c is
     // always °C regardless), true = °C for display only. In RELATIVE mode this
@@ -623,6 +641,12 @@ void dial_state_set_ui_zone(zone_idx_t zone);
 // --- Onboarding / settings setters (M4) ---
 // Dismiss SCR_WELCOME. Not persisted (see app_state_t.welcomed).
 void dial_state_set_welcomed(void);
+
+// Sign-in expired screens (LVGL task). Renew clears link_qr_hidden and posts
+// CMD_LINK_START; cancel sets link_qr_hidden and posts CMD_LINK_CANCEL. See
+// app_state_t.link_qr_hidden for why the UI flag is set before the post.
+void dial_state_link_renew(void);
+void dial_state_link_cancel(void);
 // Mark that a default side is known (see app_state_t.side_picked). Callers
 // that pick a side also call dial_state_set_ui_zone() to persist it.
 void dial_state_set_side_picked(void);
@@ -750,7 +774,8 @@ typedef enum {
     // Settings (M4) destructive actions — each erases some NVS state and
     // reboots. Handled in main.c's handle_immediate_cmd like the others
     // above; none of them return (esp_restart()).
-    CMD_RELINK,          // clear Orion tokens, keep Wi-Fi + client_id
+    CMD_RELINK,          // clear Orion tokens AND the registered client_id
+                         // (dial_oauth_forget), keep Wi-Fi + prefs
     CMD_WIFI_RESET,      // clear Wi-Fi credentials
     CMD_FACTORY_RESET,   // erase all of NVS
 
@@ -768,6 +793,14 @@ typedef enum {
     // idle-loop call for the time-based ~25s auto-clear that covers the
     // case where the user never leaves the screen at all.
     CMD_OTA_CLEAR_FAILED,
+
+    // Sign-in expired (calm re-link). Both are only meaningful while the
+    // worker is still in its pre-link loop; the steady-state drain treats them
+    // as no-ops. zone/a/b unused.
+    CMD_LINK_START,      // owner tapped Renew on SCR_LINK_EXPIRED: leave the
+                         // park, mint a code and show the renewal QR
+    CMD_LINK_CANCEL,     // owner swiped back off the renewal QR: stop the
+                         // authorize session (and its relay polling) and park
 } cmd_kind_t;
 
 typedef struct {

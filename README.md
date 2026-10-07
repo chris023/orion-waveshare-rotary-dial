@@ -75,6 +75,12 @@ board bring-up notes, and firmware architecture live in
   pairing works even if your phone is on cellular or a different Wi-Fi network
   than the dial — no local reachability required. How and why it works this way
   is written up in [docs/linking-relay.md](docs/linking-relay.md).
+- **A calm heads-up when the sign-in runs out** — Orion ends sign-in sessions
+  periodically on its side (we've observed about 30 days after linking), and
+  the dial can't extend them. When it happens the dial shows a quiet "Sign-in
+  expired" screen (your bed keeps running its schedule meanwhile) with a
+  **Renew sign-in** button, and renewing takes under a minute. *(1.6.0 betas
+  and later.)*
 - **Dual-zone control** with a side picker, so one dial can drive either
   half of the bed — plus screen rotation, so the same board reads right
   from either nightstand.
@@ -179,6 +185,14 @@ board bring-up notes, and firmware architecture live in
 <td align="center">Installing</td>
 <td align="center">Wi-Fi details</td>
 <td align="center">About</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screens/link-expired.png" width="170" alt="Calm Sign-in expired screen with a Renew sign-in button"></td>
+<td align="center"><img src="docs/screens/link-renew-qr.png" width="170" alt="QR code for renewing the Orion sign-in"></td>
+</tr>
+<tr>
+<td align="center">Sign-in expired</td>
+<td align="center">Renew sign-in</td>
 </tr>
 </table>
 

@@ -58,6 +58,7 @@ set(DIAL_UI_SRCS
   ${DIAL_UI_DIR}/scr_adjust_mode.c
   ${DIAL_UI_DIR}/scr_brightness_menu.c
   ${DIAL_UI_DIR}/scr_brightness.c
+  ${DIAL_UI_DIR}/scr_link_expired.c
   ${DIAL_UI_DIR}/dial_palette.c
   ${DIAL_UI_DIR}/dial_list.c
 )

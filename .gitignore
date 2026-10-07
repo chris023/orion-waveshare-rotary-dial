@@ -34,5 +34,6 @@ npm-debug.log*
 # and must never be published; keep them local-only)
 firmware/backups/*.bin
 
-# Desktop UI simulator build output (cmake -B build -S simulator)
+# Desktop UI simulator build output (cmake -B build -S simulator, or -B build-sim)
 /build/
+/build-sim/

@@ -67,7 +67,24 @@ bool dial_oauth_refresh(const oauth_disc_t *disc, const char *client_id);
 // finds no token to refresh and falls back to interactive consent, re-consenting
 // once. A healthy device that keeps refreshing never calls this, so it is never
 // forced to re-register.
+//
+// Does NOT clear the "lapsed" marker below: the auto-relink sets it right
+// before calling this, and it has to survive. Callers that mean "unlinked on
+// purpose" (Settings > Re-link) clear it themselves.
 void dial_oauth_forget(void);
+
+// "Session lapsed" marker (NVS "oauth"/"lapsed", u8): set when a dial that WAS
+// linked loses its session for good (the refresh token was permanently
+// rejected), so the UI can show a calm "Sign-in expired" screen instead of
+// treating it like a never-linked dial. Survives dial_oauth_forget() and
+// reboots; cleared by a successful renewal, Settings > Re-link, or factory
+// reset (nvs_flash_erase). set_lapsed(false) erases the key.
+void dial_oauth_set_lapsed(bool on);
+bool dial_oauth_is_lapsed(void);
+
+// True if a refresh token is stored. A lapsed marker alongside a live refresh
+// token can only come from an interrupted write, so main.c trusts the token.
+bool dial_oauth_have_refresh(void);
 
 // Drop only the access token (keep the refresh token + client_id), so the next
 // supervisor pass re-runs refresh instead of reusing a token the server has

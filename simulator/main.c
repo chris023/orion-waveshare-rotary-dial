@@ -44,7 +44,7 @@
 // simulator reports as installed (stubs.c's esp_app_desc_t, which tracks
 // PROJECT_VER) — otherwise the screenshots show a dial offering to update
 // itself to something it already runs. Bump it with each release.
-#define SIM_OTA_LATEST "1.5.1"
+#define SIM_OTA_LATEST "1.6.0"
 
 /* ---- host framebuffer + LVGL display driver ----------------------------- */
 
@@ -230,6 +230,10 @@ static void apply_baseline(void)
     b->actual_c = 20.0f;  // -> 68F current, still warming
 
     st->ota.status = 0;   // OTA_IDLE
+
+    // Sign-in expired flags: never linked-and-lapsed unless a scenario opts in.
+    st->link_lapsed = false;
+    st->link_qr_hidden = false;
 }
 
 /* ---- scenarios ------------------------------------------------------------*/
@@ -314,6 +318,76 @@ static void scenario_oauth_waiting(void)
     pump_ms(300);
     pump_ms(45500);   // clears scr_setup.c's OAUTH_WAIT_FIRST_MS (45000ms)
     snapshot("oauth-waiting");
+}
+
+// Sign-in expired (calm re-link): a dial whose Orion session lapsed, parked
+// on SCR_LINK_EXPIRED with no device state (have_state false). The screen
+// reads no zone fields at all, so the baseline zones are left alone — zeroing
+// them here would leak into later scenarios (apply_baseline doesn't reset
+// every zone field; hold_until_min=0 reads as "Until 12:00" on the dial).
+static void setup_link_expired(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->phase = PH_OAUTH_LAPSED;
+    st->link_lapsed = true;
+    st->have_state = false;
+    st->generation++;
+}
+
+static void scenario_link_expired(void)
+{
+    setup_link_expired();
+    ui_router_go(SCR_LINK_EXPIRED, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("link-expired");
+}
+
+// Same screen at 3am. The palette is GLOBAL and sim_state_reset() never touches
+// it, so it must be put back to day before returning or every later scenario
+// would render in night colours.
+static void scenario_link_expired_night(void)
+{
+    setup_link_expired();
+    dial_palette_set_night(true);
+    sim_state_ptr()->generation++;   // repaint under the swapped palette
+    ui_router_go(SCR_LINK_EXPIRED, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("link-expired-night");
+    dial_palette_set_night(false);
+    sim_state_ptr()->generation++;
+    pump_ms(100);
+}
+
+// The beat right after Renew: a real tap on the button (its centre, y=258),
+// which flips it to the non-clickable "Getting a code..." state before the
+// worker has moved the phase at all.
+static void scenario_link_expired_busy(void)
+{
+    setup_link_expired();
+    ui_router_go(SCR_LINK_EXPIRED, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    sim_tap(180, 258);
+    pump_ms(300);
+    snapshot("link-expired-busy");
+}
+
+// The renewal QR the tap leads to: same QR screen as first setup, but with
+// the "renew" caption and the swipe-back hint in place of the approve line.
+static void scenario_link_renew_qr(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->phase = PH_OAUTH_WAIT_CONSENT;
+    st->link_lapsed = true;
+    st->have_state = false;
+    snprintf(st->oauth_url, sizeof(st->oauth_url),
+             "https://github.com/chris023/orion-waveshare-rotary-dial");
+    snprintf(st->sta_ssid, sizeof(st->sta_ssid), "Kestrel-5G");
+    st->generation++;
+    ui_router_go(SCR_OAUTH_QR, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("link-renew-qr");
 }
 
 static void scenario_sidepick(void)
@@ -730,6 +804,10 @@ int main(void)
     scenario_passkey();
     scenario_oauth_qr();
     scenario_oauth_waiting();
+    scenario_link_expired();
+    scenario_link_expired_night();
+    scenario_link_expired_busy();
+    scenario_link_renew_qr();
     scenario_sidepick();
     scenario_connecting();
     scenario_dial();

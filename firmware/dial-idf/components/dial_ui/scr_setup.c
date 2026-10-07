@@ -138,6 +138,14 @@ const ui_screen_t scr_wifi_portal = {
  */
 static lv_obj_t *s_oauth_card, *s_oauth_qr, *s_oauth_lbl, *s_oauth_hint_lbl;
 
+// This QR is a RENEWAL (app_state_t.link_lapsed): the dial was linked, its
+// session expired, and the owner tapped Renew on SCR_LINK_EXPIRED to get here.
+// Cached from on_state so the gesture handler can tell the two flows apart.
+// The renewal copy says "renew" rather than "link", and a right swipe goes back
+// to the calm screen; first setup has no such screen to go back to and keeps
+// every word it had.
+static bool s_lapsed;
+
 // The explainer is a dismissible sheet drawn OVER the card (not squeezed in
 // below it): below the card there is only the ~50px strip between its
 // bottom edge (y=308) and the round panel's rim, nowhere near enough for
@@ -207,15 +215,31 @@ static void oauth_wait_dismiss_cb(lv_event_t *e)
 
 // Swipe left to the menu — the same gesture that walks off the dial face, so
 // this screen stops being the one place in the UI where it does nothing. That
-// is where Re-link, Wi-Fi and software update live. RIGHT is left unconsumed
-// rather than faked: there is nothing to the right of this screen, exactly as
-// on the dial chain's leftmost face.
+// is where Re-link, Wi-Fi and software update live. During first setup RIGHT is
+// left unconsumed rather than faked: there is nothing to the right of this
+// screen, exactly as on the dial chain's leftmost face.
+//
+// A renewal is different: the owner came here from SCR_LINK_EXPIRED by
+// choice, so RIGHT goes back there. dial_state_link_cancel() raises
+// link_qr_hidden BEFORE posting CMD_LINK_CANCEL, so nav_policy agrees with
+// this navigation immediately instead of putting the QR back while the worker
+// is still inside a blocking relay poll; the worker then ends the authorize
+// session (and its polling) and parks. There is no visible back button: a
+// >=72px target doesn't fit outside the 228px card without entering the rim
+// band or shrinking the QR, and the 5-minute consent window and the menu's
+// go-home already lead back to the calm screen.
 //
 // Safe with the explainer up: the router calls lv_indev_wait_release() on a
 // consumed gesture, so a swipe that began on the sheet can't also fire its
 // dismiss CLICKED on finger-lift.
 static bool oauth_on_gesture(lv_dir_t dir)
 {
+    if (dir == LV_DIR_RIGHT && s_lapsed) {
+        dial_haptics_play(HAPTIC_TICK);
+        dial_state_link_cancel();
+        ui_router_go(SCR_LINK_EXPIRED, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+        return true;
+    }
     if (dir != LV_DIR_LEFT) return false;
     ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
     return true;
@@ -335,15 +359,30 @@ static void oauth_on_state(const app_state_t *st)
     lv_obj_set_style_border_color(s_wait_close_btn, pal->track, 0);
     lv_obj_set_style_text_color(s_wait_close_lbl, pal->ink_primary, 0);
 
+    s_lapsed = st->link_lapsed;
+
     if (st->oauth_url[0])
         lv_qrcode_update(s_oauth_qr, st->oauth_url, strlen(st->oauth_url));
 
     // Linking is outbound-only now (via the relay), so the phone can be on ANY
     // network — cellular, guest, a different Wi-Fi — and this copy no longer
-    // names or depends on the dial's SSID. Constant text; nothing here varies.
-    lv_label_set_text(s_oauth_hint_lbl, "Scan the code, then approve on your phone");
-    lv_label_set_text(s_wait_body_lbl,
-                      "Scan the code and approve\non your phone. A new code\nappears if this one expires.");
+    // names or depends on the dial's SSID. The only thing that varies is
+    // first link vs. renewal (s_lapsed, above).
+    //
+    // A renewal's code is NOT re-minted when the consent window elapses — the
+    // worker drops back to SCR_LINK_EXPIRED instead — so its explainer must not
+    // promise a new one, and its hint names the way back rather than repeating
+    // the caption.
+    if (s_lapsed) {
+        lv_label_set_text(s_oauth_lbl, "Scan to renew sign-in");
+        lv_label_set_text(s_oauth_hint_lbl, "Swipe right to go back");
+        lv_label_set_text(s_wait_body_lbl, "Scan the code and approve\non your phone.");
+    } else {
+        lv_label_set_text(s_oauth_lbl, "Scan to link your dial");
+        lv_label_set_text(s_oauth_hint_lbl, "Scan the code, then approve on your phone");
+        lv_label_set_text(s_wait_body_lbl,
+                          "Scan the code and approve\non your phone. A new code\nappears if this one expires.");
+    }
 
     // Fresh QR detection. This screen is NOT rebuilt when main.c's 5-minute
     // consent window elapses and restarts the authorize flow with a new URL

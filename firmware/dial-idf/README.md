@@ -260,6 +260,16 @@ itself:
   is a link to its Wi-Fi settings), and re-approve the consent page. A dropped
   approval times out on its own and the QR refreshes — just scan and approve
   again.
+- **The dial says "Sign-in expired."** Orion ends sign-in sessions
+  periodically on its side — we've observed it about 30 days after linking
+  (one observation so far) — and nothing the dial does can extend that. It
+  isn't a fault: your bed keeps running its schedule in the meantime. Tap
+  **Renew sign-in**, scan the QR code that appears, and approve on your phone;
+  it takes under a minute. Swipe right on the QR to back out, and if you leave
+  it up the dial returns to the calm screen after 5 minutes. While it waits,
+  the dial stops contacting Orion and the sign-in relay; it only checks for
+  updates if you ask from the menu. (Firmware 1.6.0 betas and later; older
+  firmware shows the setup QR straight away instead.)
 - **The dial is stuck on "Connecting to Wi-Fi..." / "Orion unreachable."**
   These screens show the actual error and a retry countdown; the dial keeps
   retrying with backoff on its own. If it's stuck for more than a few

@@ -228,6 +228,26 @@ void dial_state_clear_wifi_join_failed(void)
     s_state.generation++;
 }
 
+// Sign-in expired (calm re-link): same UI-side effect as the firmware's
+// setters (flip link_qr_hidden, bump the generation, post the command), so
+// the expired screen's busy state and the QR's swipe-back render exactly as on
+// the device. There's no worker to act on the posted command here.
+void dial_state_link_renew(void)
+{
+    s_state.link_qr_hidden = false;
+    s_state.generation++;
+    app_cmd_t cmd = { .kind = CMD_LINK_START };
+    dial_cmd_post(&cmd);
+}
+
+void dial_state_link_cancel(void)
+{
+    s_state.link_qr_hidden = true;
+    s_state.generation++;
+    app_cmd_t cmd = { .kind = CMD_LINK_CANCEL };
+    dial_cmd_post(&cmd);
+}
+
 void dial_state_set_phase(conn_phase_t phase, const char *err)
 {
     s_state.phase = phase;
@@ -252,9 +272,9 @@ void dial_cmd_post(const app_cmd_t *cmd)
     // here), but a stale table silently prints the wrong name forever, which
     // is how this one drifted after CMD_MATCH_PARTNER's removal (§4).
     static const char *KIND[] = {
-        "SET_TEMP", "TOGGLE_ON", "BOOST_START", "BOOST_CANCEL", "BED_OFF",
+        "SET_TEMP", "TOGGLE_ON", "BOOST_START", "BOOST_CANCEL",
         "AWAY", "RELINK", "WIFI_RESET", "FACTORY_RESET", "OTA_CHECK",
-        "OTA_APPLY", "OTA_CLEAR_FAILED",
+        "OTA_APPLY", "OTA_CLEAR_FAILED", "LINK_START", "LINK_CANCEL",
     };
     const char *k = (cmd->kind >= 0 && (size_t)cmd->kind < sizeof(KIND) / sizeof(KIND[0]))
                         ? KIND[cmd->kind] : "?";

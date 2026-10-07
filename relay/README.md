@@ -192,5 +192,6 @@ in the firmware stream.)
   and `/poll` at the edge — the in-app cap does not cover distinct-state floods.
 - **`compatibility_date` is pinned, never `Date.now()`** — the relay must not
   behave differently because of the day it deployed. Bump it deliberately.
-- **This does not remove the ~weekly re-link prompt** — that's Orion's
-  server-side refresh TTL. It makes each re-link reliable and inbound-free.
+- **This does not change how often a dial needs to re-link** — Orion ends
+  sign-in sessions periodically on its side (observed once at ~30 days after
+  linking). The relay makes each re-link reliable and inbound-free.
