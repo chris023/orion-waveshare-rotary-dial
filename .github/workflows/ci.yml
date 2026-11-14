@@ -18,3 +18,6 @@ jobs:
           esp_idf_version: v6.0
           target: esp32s3
           path: 'firmware/dial-idf'
+
+      - name: Test authentication response handling
+        run: python3 firmware/dial-idf/test/run_auth_tests.py
