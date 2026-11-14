@@ -6,6 +6,7 @@
 
 #include "dial_mcp.h"
 #include "dial_oauth.h"
+#include "dial_http.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +46,7 @@ typedef struct {
     char *buf; int len; int cap;
     char content_type[64];
     char session_id[128];
+    bool headers_only;
 } mcp_resp_t;
 
 /*
@@ -81,7 +83,7 @@ static esp_err_t on_http(esp_http_client_event_t *e)
         }
         break;
     case HTTP_EVENT_ON_DATA:
-        if (e->data_len > 0) {
+        if (e->data_len > 0 && !r->headers_only) {
             if (r->len + e->data_len + 1 > r->cap) {
                 r->cap = (r->len + e->data_len) * 2 + 512;
                 r->buf = realloc(r->buf, r->cap);
@@ -133,7 +135,7 @@ static bool http_open(void)
 // One POST on the persistent handle. Headers are re-set every call because the
 // bearer token changes on refresh, and because a reconnect hands us a fresh
 // handle with none of them.
-static esp_err_t http_send(const char *method, const char *auth, const char *body)
+static esp_err_t http_prepare(const char *method, const char *auth, const char *body)
 {
     if (!http_open()) return ESP_ERR_NO_MEM;
 
@@ -145,8 +147,27 @@ static esp_err_t http_send(const char *method, const char *auth, const char *bod
     if (strcmp(method, "initialize") != 0)
         esp_http_client_set_header(s_http, "MCP-Protocol-Version", MCP_PROTOCOL_VERSION);
     esp_http_client_set_post_field(s_http, body, strlen(body));
+    return ESP_OK;
+}
 
-    return esp_http_client_perform(s_http);
+static esp_err_t http_send(const char *method, const char *auth, const char *body,
+                           bool *auth_replayed)
+{
+    esp_err_t err = http_prepare(method, auth, body);
+    if (err != ESP_OK) return err;
+    err = esp_http_client_perform(s_http);
+    if (dial_http_auth_check_failed(s_http, err)) {
+        ESP_LOGW(TAG, "HTTP 401 auth check failed; reading one explicit replay");
+        free(s_active->buf);
+        *s_active = (mcp_resp_t){ .headers_only = true };
+        *auth_replayed = true;
+        http_close();
+        err = http_prepare(method, auth, body);
+        if (err == ESP_OK)
+            err = dial_http_retry_unauthorized(s_http, body, &s_active->buf, 20000);
+        s_active->headers_only = false;
+    }
+    return err;
 }
 
 /*
@@ -183,8 +204,9 @@ static cJSON *rpc(const char *method, cJSON *params, bool notification, bool *ok
     s_active = &r;
 
     int64_t t0 = esp_timer_get_time();
-    esp_err_t err = http_send(method, auth, body);
-    if (err != ESP_OK) {
+    bool auth_replayed = false;
+    esp_err_t err = http_send(method, auth, body, &auth_replayed);
+    if (err != ESP_OK && !auth_replayed) {
         // A kept-alive connection the server has since dropped (idle timeout,
         // or the Wi-Fi went away and came back) fails on its FIRST use and only
         // then — the socket looks fine until we write to it. That is not a real
@@ -204,7 +226,7 @@ static cJSON *rpc(const char *method, cJSON *params, bool notification, bool *ok
         // on this path (we're already in the failure lane) and turns that
         // filter from a hard wall into a one-retry inconvenience.
         vTaskDelay(pdMS_TO_TICKS(1000));
-        err = http_send(method, auth, body);
+        err = http_send(method, auth, body, &auth_replayed);
     }
     int status = (err == ESP_OK) ? esp_http_client_get_status_code(s_http) : -1;
     ESP_LOGI(TAG, "%s: %d in %lld ms", method, status, (esp_timer_get_time() - t0) / 1000);

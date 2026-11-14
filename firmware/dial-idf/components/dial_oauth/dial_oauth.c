@@ -6,6 +6,7 @@
  */
 
 #include "dial_oauth.h"
+#include "dial_http.h"
 #include "dial_link_config.h"   // ORION_DIAL_RELAY_BASE — the code-relay origin
 
 #include <stdlib.h>
@@ -109,6 +110,33 @@ static void http_reset(void)
     if (s_http) { esp_http_client_cleanup(s_http); s_http = NULL; }
 }
 
+static bool http_prepare(const char *url, esp_http_client_method_t method,
+                         const char *content_type, const char *body_in,
+                         int timeout_ms)
+{
+    if (!s_http) {
+        esp_http_client_config_t cfg = {
+            .url = url,
+            .event_handler = on_http,
+            .cert_pem = orion_root_ca_pem_start,
+            .timeout_ms = timeout_ms,
+            .keep_alive_enable = true,
+        };
+        s_http = esp_http_client_init(&cfg);
+        if (!s_http) return false;
+    } else {
+        esp_http_client_set_url(s_http, url);
+    }
+    // Reapply the timeout and clear persistent POST headers/body for GETs.
+    esp_http_client_set_timeout_ms(s_http, timeout_ms);
+    esp_http_client_set_method(s_http, method);
+    esp_http_client_set_header(s_http, "Accept", "application/json");
+    if (content_type) esp_http_client_set_header(s_http, "Content-Type", content_type);
+    else              esp_http_client_delete_header(s_http, "Content-Type");
+    esp_http_client_set_post_field(s_http, body_in, body_in ? strlen(body_in) : 0);
+    return true;
+}
+
 // Perform an HTTP request on the shared keep-alive handle. body_in/
 // content_type NULL for GET. Returns HTTP status (or -1); *body_out is a
 // malloc'd, NUL-terminated body (caller frees).
@@ -123,41 +151,31 @@ static int http_do(const char *url, esp_http_client_method_t method,
     // server quietly closed fails its first reuse — same workaround
     // dial_mcp's http_send carries, not a general retry loop.
     esp_err_t err = ESP_FAIL;
+    bool auth_replayed = false;
     for (int attempt = 0; attempt < 2; attempt++) {
-        if (!s_http) {
-            esp_http_client_config_t cfg = {
-                .url = url,
-                .event_handler = on_http,
-                .cert_pem = orion_root_ca_pem_start,   // verify against Orion's embedded roots
-                .timeout_ms = timeout_ms,
-                .keep_alive_enable = true,
-            };
-            s_http = esp_http_client_init(&cfg);
-            if (!s_http) { s_resp = NULL; *body_out = NULL; return -1; }
-        } else {
-            esp_http_client_set_url(s_http, url);
+        if (!http_prepare(url, method, content_type, body_in, timeout_ms)) {
+            s_resp = NULL; *body_out = NULL; return -1;
         }
-        // The handle is kept alive and reused, so its init-time timeout would
-        // otherwise stick at whatever the FIRST caller set. Re-apply per call so
-        // the relay poll's short timeout (below) actually takes effect and can't
-        // let one blocking poll stall the consent loop's reboot servicing.
-        esp_http_client_set_timeout_ms(s_http, timeout_ms);
-        esp_http_client_set_method(s_http, method);
-        esp_http_client_set_header(s_http, "Accept", "application/json");
-        // Headers and the POST body PERSIST on a reused handle: clear both
-        // explicitly on requests that don't carry them, or a GET after a
-        // token POST replays the old body.
-        if (content_type) esp_http_client_set_header(s_http, "Content-Type", content_type);
-        else              esp_http_client_delete_header(s_http, "Content-Type");
-        esp_http_client_set_post_field(s_http, body_in, body_in ? strlen(body_in) : 0);
 
         err = esp_http_client_perform(s_http);
+        if (dial_http_auth_check_failed(s_http, err)) {
+            ESP_LOGW(TAG, "HTTP 401 auth check failed; reading one explicit replay");
+            free(r.buf); r = (resp_t){ 0 };
+            s_resp = NULL;   // native read returns the body, including cached bytes
+            auth_replayed = true;
+            // Do not reuse perform()'s partially consumed response buffer.
+            http_reset();
+            err = http_prepare(url, method, content_type, body_in, timeout_ms)
+                ? dial_http_retry_unauthorized(s_http, body_in, &r.buf, timeout_ms)
+                : ESP_ERR_NO_MEM;
+            s_resp = &r;
+        }
         if (err == ESP_OK) break;
         ESP_LOGW(TAG, "%s: %s%s", url, esp_err_to_name(err),
-                 attempt == 0 ? " (retrying on a fresh connection)" : "");
+                 attempt == 0 && !auth_replayed ? " (retrying on a fresh connection)" : "");
         // Salvage the TLS detail BEFORE dropping the handle (cert check below).
         int tc = 0, tf = 0;
-        esp_http_client_get_and_clear_last_tls_error(s_http, &tc, &tf);
+        if (s_http) esp_http_client_get_and_clear_last_tls_error(s_http, &tc, &tf);
         s_last_err_cert = tf != 0;
         // A transport failure returns -1 with no body, so "HTTP -1" was the
         // whole story anyone got -- on screen and in the log. Keep the reason
@@ -169,6 +187,7 @@ static int http_do(const char *url, esp_http_client_method_t method,
                  esp_err_to_name(err), tc, tf, (unsigned)esp_get_free_heap_size());
         http_reset();
         free(r.buf); r = (resp_t){ 0 };   // don't glue two attempts' bodies together
+        if (auth_replayed) break;   // never replay a rejection more than once
     }
 
     int status = (err == ESP_OK) ? esp_http_client_get_status_code(s_http) : -1;

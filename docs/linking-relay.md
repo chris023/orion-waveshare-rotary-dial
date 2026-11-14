@@ -170,6 +170,17 @@ From firmware 1.6.0 (first in 1.6.0-beta.1) the dial handles this calmly: instea
 of a setup QR it shows a quiet "Sign-in expired" screen (the bed keeps running its
 schedule meanwhile), and the owner renews from it in under a minute.
 
+The HTTP clients preserve authentication errors rather than reporting an
+unsupported Bearer challenge as a network outage. ESP-IDF v6.0 can stop
+`perform()` at a 401 before finishing its body (including when no
+`WWW-Authenticate` header is present). Only that confirmed authentication-check
+failure gets one explicit streaming replay on a fresh handle, with the same
+request headers and verified TLS settings, a 16 KiB response limit, and read
+timeouts. Normal requests retain their keep-alive path; incomplete responses,
+TLS/network failures, and unrelated HTTP errors remain transient. A 401 alone
+does not unlink anything: only HTTP 400/401 with a parsed `invalid_grant` can
+count toward the existing two consecutive permanent refresh failures.
+
 ### Rollout
 
 Already-linked dials are untouched: token **refresh** carries no `redirect_uri`,

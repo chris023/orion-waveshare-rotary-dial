@@ -1,7 +1,26 @@
 # Host tests
 
-Small, dependency-free tests that compile against the firmware headers with a
-plain host compiler — no ESP-IDF, no board.
+Small tests using a plain host compiler — no board. The relative-scale test is
+dependency-free; the authentication test uses the project's existing cJSON.
+
+## `test_dial_auth.c`
+
+Compiles the real OAuth, MCP, and HTTP fallback implementations against a mock
+ESP-IDF transport and synthetic credentials. Covers missing/Bearer challenges,
+fragmented and cached response bytes, `400/401 + invalid_grant` classification,
+other HTTP errors, stale statuses, TLS failures, successful handle reuse, and
+bounded replay failures (open/write/headers/read, incomplete EOF, deadline, and
+16 KiB response limit). No live Orion requests or device access.
+
+Run after `idf.py build` has resolved cJSON, from `firmware/dial-idf`:
+
+```sh
+python test/run_auth_tests.py
+```
+
+Alternatively pass `--cjson /path/to/cJSON` (directory containing `cJSON.c` and
+`cJSON.h`). `CC` can select a GCC-compatible host compiler. Expected output:
+`all authentication-response assertions passed`.
 
 ## `test_dial_rel.c`
 
